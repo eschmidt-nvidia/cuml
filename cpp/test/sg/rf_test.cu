@@ -117,14 +117,18 @@ struct RfTestParams {
   int max_leaves;
   bool bootstrap;
   int max_n_bins;
-  int min_samples_leaf;
-  int min_samples_split;
+  int min_samples_leaf_splitting;
+  int min_samples_leaf_averaging;
+  int min_samples_split_splitting;
+  int min_samples_split_averaging;
   float min_impurity_decrease;
   int n_streams;
   CRITERION split_criterion;
   int seed;
   int n_labels;
   bool double_precision;
+  bool double_bootstrap;
+  bool oob_honesty;
   // c++ has no reflection, so we enumerate the types here
   // This must be updated if new fields are added
   using types = std::tuple<std::size_t,
@@ -138,11 +142,15 @@ struct RfTestParams {
                            int,
                            int,
                            int,
+                           int,
+                           int,
                            float,
                            int,
                            CRITERION,
                            int,
                            int,
+                           bool,
+                           bool,
                            bool>;
 };
 
@@ -152,12 +160,14 @@ std::ostream& operator<<(std::ostream& os, const RfTestParams& ps)
   os << ", n_trees = " << ps.n_trees << ", max_features = " << ps.max_features;
   os << ", max_samples = " << ps.max_samples << ", max_depth = " << ps.max_depth;
   os << ", max_leaves = " << ps.max_leaves << ", bootstrap = " << ps.bootstrap;
-  os << ", max_n_bins = " << ps.max_n_bins << ", min_samples_leaf = " << ps.min_samples_leaf;
-  os << ", min_samples_split = " << ps.min_samples_split;
+  os << ", max_n_bins = " << ps.max_n_bins;
+  os << ", min_samples_leaf_splitting = " << ps.min_samples_leaf_splitting << ", min_samples_split_splitting = " << ps.min_samples_split_splitting;
+  os << ", min_samples_leaf_averaging = " << ps.min_samples_leaf_averaging << ", min_samples_split_averaging = " << ps.min_samples_split_averaging;
   os << ", min_impurity_decrease = " << ps.min_impurity_decrease
      << ", n_streams = " << ps.n_streams;
   os << ", split_criterion = " << ps.split_criterion << ", seed = " << ps.seed;
   os << ", n_labels = " << ps.n_labels << ", double_precision = " << ps.double_precision;
+  os << ", oob_honesty = " << ps.oob_honesty << ", double_bootstrap = " << ps.double_bootstrap;
   return os;
 }
 
@@ -214,10 +224,14 @@ auto TrainScore(
                                       params.max_leaves,
                                       params.max_features,
                                       params.max_n_bins,
-                                      params.min_samples_leaf,
-                                      params.min_samples_split,
+                                      params.min_samples_leaf_splitting,
+                                      params.min_samples_leaf_averaging,
+                                      params.min_samples_split_splitting,
+                                      params.min_samples_split_averaging,
                                       params.min_impurity_decrease,
                                       params.bootstrap,
+                                      params.oob_honesty,
+                                      params.double_bootstrap,
                                       params.n_trees,
                                       params.max_samples,
                                       0,
@@ -341,8 +355,9 @@ class RfSpecialisedTest {
       if (params.max_leaves > 0) { EXPECT_LE(forest->trees[i]->leaf_counter, params.max_leaves); }
 
       EXPECT_LE(forest->trees[i]->depth_counter, params.max_depth);
+      const int exp_min_avging = params.oob_honesty ? params.min_samples_leaf_averaging : 0;
       EXPECT_LE(forest->trees[i]->leaf_counter,
-                raft::ceildiv(int(params.n_rows), params.min_samples_leaf));
+                raft::ceildiv(int(params.n_rows), params.min_samples_leaf_splitting + exp_min_avging));
     }
   }
 
@@ -465,6 +480,7 @@ class RfTest : public ::testing::TestWithParam<RfTestParams> {
   void SetUp() override
   {
     RfTestParams params = ::testing::TestWithParam<RfTestParams>::GetParam();
+    std::cout << "Params " << params << std::endl;
     bool is_regression  = params.split_criterion != GINI and params.split_criterion != ENTROPY;
     if (params.double_precision) {
       if (is_regression) {
@@ -494,8 +510,10 @@ std::vector<int> max_depth               = {1, 10, 30};
 std::vector<int> max_leaves              = {-1, 16, 50};
 std::vector<bool> bootstrap              = {false, true};
 std::vector<int> max_n_bins              = {2, 57, 128, 256};
-std::vector<int> min_samples_leaf        = {1, 10, 30};
-std::vector<int> min_samples_split       = {2, 10};
+std::vector<int> min_samples_leaf_splitting  = {1, 10, 30};
+std::vector<int> min_samples_leaf_averaging  = {1, 10, 30};
+std::vector<int> min_samples_split_splitting = {2, 10};
+std::vector<int> min_samples_split_averaging = {2, 10};
 std::vector<float> min_impurity_decrease = {0.0f, 1.0f, 10.0f};
 std::vector<int> n_streams               = {1, 2, 10};
 std::vector<CRITERION> split_criterion   = {CRITERION::INVERSE_GAUSSIAN,
@@ -507,6 +525,8 @@ std::vector<CRITERION> split_criterion   = {CRITERION::INVERSE_GAUSSIAN,
 std::vector<int> seed                    = {0, 17};
 std::vector<int> n_labels                = {2, 10, 20};
 std::vector<bool> double_precision       = {false, true};
+std::vector<bool> double_bootstrap       = {true};
+std::vector<bool> oob_honesty            = {false};
 
 int n_tests = 100;
 
@@ -523,14 +543,18 @@ INSTANTIATE_TEST_CASE_P(RfTests,
                                                                            max_leaves,
                                                                            bootstrap,
                                                                            max_n_bins,
-                                                                           min_samples_leaf,
-                                                                           min_samples_split,
+                                                                           min_samples_leaf_splitting,
+                                                                           min_samples_leaf_averaging,
+                                                                           min_samples_split_splitting,
+                                                                           min_samples_split_averaging,
                                                                            min_impurity_decrease,
                                                                            n_streams,
                                                                            split_criterion,
                                                                            seed,
                                                                            n_labels,
-                                                                           double_precision)));
+                                                                           double_precision,
+                                                                           double_bootstrap,
+                                                                           oob_honesty)));
 
 TEST(RfTests, IntegerOverflow)
 {
@@ -547,7 +571,7 @@ TEST(RfTests, IntegerOverflow)
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 2, 0.0, false, 1, 1.0, 0, CRITERION::MSE, 4, 128);
+    set_rf_params(3, 100, 1.0, 256, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, CRITERION::MSE, 4, 128);
   fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
 
   // Check we have actually learned something
@@ -789,7 +813,7 @@ INSTANTIATE_TEST_CASE_P(RfTests, RFQuantileVariableBinsTestD, ::testing::ValuesI
 
 TEST(RfTest, TextDump)
 {
-  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 2, 0.0, false, 1, 1.0, 0, GINI, 1, 128);
+  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, GINI, 1, 128);
   auto forest         = std::make_shared<RandomForestMetaData<float, int>>();
 
   std::vector<float> X_host      = {1, 2, 3, 6, 7, 8};
@@ -831,7 +855,8 @@ struct ObjectiveTestParameters {
   int n_rows;
   int max_n_bins;
   int n_classes;
-  int min_samples_leaf;
+  int min_samples_leaf_splitting;
+  int min_samples_leaf_averaging;
   double tolerance;
 };
 
@@ -929,7 +954,8 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
                     (n_right / n) * right_mse);  // gain in long form without proxy
 
     // edge cases
-    if (n_left < params.min_samples_leaf or n_right < params.min_samples_leaf)
+    printf("gain %f\n", gain);
+    if (n_left < params.min_samples_leaf_splitting or n_right < params.min_samples_leaf_splitting)
       return -std::numeric_limits<DataT>::max();
     else
       return gain;
@@ -966,7 +992,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
                  (n_right / n) * right_ighd);  // gain in long form without proxy
 
     // edge cases
-    if (n_left < params.min_samples_leaf or n_right < params.min_samples_leaf or
+    if (n_left < params.min_samples_leaf_splitting or n_right < params.min_samples_leaf_splitting or
         label_sum < ObjectiveT::eps_ or label_sum_right < ObjectiveT::eps_ or
         label_sum_left < ObjectiveT::eps_)
       return -std::numeric_limits<DataT>::max();
@@ -1006,7 +1032,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
                     (n_right / n) * right_ghd);  // gain in long form without proxy
 
     // edge cases
-    if (n_left < params.min_samples_leaf or n_right < params.min_samples_leaf or
+    if (n_left < params.min_samples_leaf_splitting or n_right < params.min_samples_leaf_splitting or
         label_sum < ObjectiveT::eps_ or label_sum_right < ObjectiveT::eps_ or
         label_sum_left < ObjectiveT::eps_)
       return -std::numeric_limits<DataT>::max();
@@ -1044,7 +1070,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
                               (n_right / n) * right_phd);  // gain in long form without proxy
 
     // edge cases
-    if (n_left < params.min_samples_leaf or n_right < params.min_samples_leaf or
+    if (n_left < params.min_samples_leaf_splitting or n_right < params.min_samples_leaf_splitting or
         label_sum < ObjectiveT::eps_ or label_sum_right < ObjectiveT::eps_ or
         label_sum_left < ObjectiveT::eps_)
       return -std::numeric_limits<DataT>::max();
@@ -1083,7 +1109,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
     auto gain = parent_entropy - ((left_n / n) * left_entropy + (right_n / n) * right_entropy);
 
     // edge cases
-    if (left_n < params.min_samples_leaf or right_n < params.min_samples_leaf) {
+    if (left_n < params.min_samples_leaf_splitting or right_n < params.min_samples_leaf_splitting) {
       return -std::numeric_limits<DataT>::max();
     } else {
       return gain;
@@ -1120,7 +1146,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
     auto gain = parent_gini - ((left_n / n) * left_gini + (right_n / n) * right_gini);
 
     // edge cases
-    if (left_n < params.min_samples_leaf or right_n < params.min_samples_leaf) {
+    if (left_n < params.min_samples_leaf_splitting or right_n < params.min_samples_leaf_splitting) {
       return -std::numeric_limits<DataT>::max();
     } else {
       return gain;
@@ -1177,7 +1203,7 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
   {
     srand(params.seed);
     params = ::testing::TestWithParam<ObjectiveTestParameters>::GetParam();
-    ObjectiveT objective(params.n_classes, params.min_samples_leaf);
+    ObjectiveT objective(params.n_classes, params.min_samples_leaf_splitting, params.min_samples_leaf_averaging);
 
     auto data                 = GenRandomData();
     auto [cdf_hist, pdf_hist] = GenHist(data);
@@ -1187,53 +1213,56 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
     auto hypothesis_gain = objective.GainPerSplit(&cdf_hist[0],
                                                   split_bin_index,
                                                   params.max_n_bins,
+                                                  NumLeftOfBin(cdf_hist, split_bin_index),
+                                                  0, // nLeftAveraging
                                                   NumLeftOfBin(cdf_hist, params.max_n_bins - 1),
-                                                  NumLeftOfBin(cdf_hist, split_bin_index));
+                                                  0 // nRightAveraging
+                                                  );
 
     ASSERT_NEAR(ground_truth_gain, hypothesis_gain, params.tolerance);
   }
 };
 
 const std::vector<ObjectiveTestParameters> mse_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 1, 0, 0.00001},
-  {9507819643927052259LLU, 2048, 128, 1, 1, 0.00001},
-  {9507819643927052251LLU, 2048, 256, 1, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 1, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 1, 1, 0, 0.00001},
+  {9507819643927052259LLU, 2048, 128, 1, 1, 0, 0.00001},
+  {9507819643927052251LLU, 2048, 256, 1, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 1, 5, 0, 0.00001},
 };
 
 const std::vector<ObjectiveTestParameters> poisson_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 1, 0, 0.00001},
-  {9507819643927052259LLU, 2048, 128, 1, 1, 0.00001},
-  {9507819643927052251LLU, 2048, 256, 1, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 1, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 1, 1, 0, 0.00001},
+  {9507819643927052259LLU, 2048, 128, 1, 1, 0, 0.00001},
+  {9507819643927052251LLU, 2048, 256, 1, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 1, 5, 0, 0.00001},
 };
 
 const std::vector<ObjectiveTestParameters> gamma_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 1, 0, 0.00001},
-  {9507819643927052259LLU, 2048, 128, 1, 1, 0.00001},
-  {9507819643927052251LLU, 2048, 256, 1, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 1, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 1, 1, 0, 0.00001},
+  {9507819643927052259LLU, 2048, 128, 1, 1, 0, 0.00001},
+  {9507819643927052251LLU, 2048, 256, 1, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 1, 5, 0, 0.00001},
 };
 
 const std::vector<ObjectiveTestParameters> invgauss_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 1, 0, 0.00001},
-  {9507819643927052259LLU, 2048, 128, 1, 1, 0.00001},
-  {9507819643927052251LLU, 2048, 256, 1, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 1, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 1, 1, 0, 0.00001},
+  {9507819643927052259LLU, 2048, 128, 1, 1, 0, 0.00001},
+  {9507819643927052251LLU, 2048, 256, 1, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 1, 5, 0, 0.00001},
 };
 
 const std::vector<ObjectiveTestParameters> entropy_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 2, 0, 0.00001},
-  {9507819643927052256LLU, 2048, 128, 10, 1, 0.00001},
-  {9507819643927052257LLU, 2048, 256, 100, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 100, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 2, 0, 0, 0.00001},
+  {9507819643927052256LLU, 2048, 128, 10, 1, 0, 0.00001},
+  {9507819643927052257LLU, 2048, 256, 100, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 100, 5, 0, 0.00001},
 };
 
 const std::vector<ObjectiveTestParameters> gini_objective_test_parameters = {
-  {9507819643927052255LLU, 2048, 64, 2, 0, 0.00001},
-  {9507819643927052256LLU, 2048, 128, 10, 1, 0.00001},
-  {9507819643927052257LLU, 2048, 256, 100, 1, 0.00001},
-  {9507819643927052258LLU, 2048, 512, 100, 5, 0.00001},
+  {9507819643927052255LLU, 2048, 64, 2, 0, 0, 0.00001},
+  {9507819643927052256LLU, 2048, 128, 10, 1, 0, 0.00001},
+  {9507819643927052257LLU, 2048, 256, 100, 1, 0, 0.00001},
+  {9507819643927052258LLU, 2048, 512, 100, 5, 0, 0.00001},
 };
 
 // mse objective test

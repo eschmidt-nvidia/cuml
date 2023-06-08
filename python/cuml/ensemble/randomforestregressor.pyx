@@ -168,6 +168,14 @@ class RandomForestRegressor(BaseRandomForestModel,
             * If ``True``, eachtree in the forest is built
               on a bootstrapped sample with replacement.
             * If ``False``, the whole dataset is used to build each tree.
+    oob_honesty : boolean (default = True)
+        Control oob_honesty.\n
+            * If ``True``, eachtree in the forest is built using disjoint sets for splitting and averaging
+            * If ``False``, the whole dataset is used to build each tree.
+    double_bootstrap : boolean (default = True)
+        Control bootstrapping in the averaging set. Only applies if oob_honesty is truer.\n
+            * If ``True``, each tree uses an averaging set which is sampled with replacement from the samples not used for splitting
+            * If ``False``, each tree uses an averaging set which is the set difference of all samples presented to the tree and the splitting set
     max_samples : float (default = 1.0)
         Ratio of dataset rows used while fitting each tree.
     max_depth : int (default = 16)
@@ -194,20 +202,33 @@ class RandomForestRegressor(BaseRandomForestModel,
         increasing the number of bins may improve accuracy.
     n_streams : int (default = 4 )
         Number of parallel streams used for forest building
-    min_samples_leaf : int or float (default = 1)
-        The minimum number of samples (rows) in each leaf node.\n
-         * If type ``int``, then ``min_samples_leaf`` represents the minimum
-           number.\n
-         * If ``float``, then ``min_samples_leaf`` represents a fraction and
-           ``ceil(min_samples_leaf * n_rows)`` is the minimum number of
-           samples for each leaf node.
-    min_samples_split : int or float (default = 2)
-        The minimum number of samples required to split an internal
-        node.\n
-         * If type ``int``, then min_samples_split represents the minimum
+    min_samples_leaf_splitting : int or float (default = 1)
+        The minimum number of training samples (rows) in each leaf node.\n
+         * If type ``int``, then ``min_samples_leaf_splitting`` represents the minimum
            number.
-         * If type ``float``, then ``min_samples_split`` represents a fraction
-           and ``max(2, ceil(min_samples_split * n_rows))`` is the minimum
+         * If ``float``, then ``min_samples_leaf_splitting`` represents a fraction and
+           ``ceil(min_samples_leaf_splitting * n_rows)`` is the minimum number of
+           samples for each leaf node.
+    min_samples_leaf_averaging : int or float (default = 2)
+        The minimum number of averaging samples (rows, oob_honesty) in each leaf node.\n
+         * If type ``int``, then ``min_samples_leaf_averaging`` represents the minimum
+           number.
+         * If ``float``, then ``min_samples_leaf_averaging`` represents a fraction and
+           ``ceil(min_samples_leaf_averaging * n_rows)`` is the minimum number of
+           samples for each leaf node.
+    min_samples_split_splitting : int or float (default = 2)
+        The minimum number of trainingsamples required to split an internal node.\n
+         * If type ``int``, then min_samples_split_splitting represents the minimum
+           number.
+         * If type ``float``, then ``min_samples_split_splitting`` represents a fraction
+           and ``max(2, ceil(min_samples_split_splitting * n_rows))`` is the minimum
+           number of samples for each split.
+    min_samples_split_averaging : int or float (default = 2)
+        The minimum number of averaging samples (oob_honesty) required to split an internal node.\n
+         * If type ``int``, then min_samples_split_splitting represents the minimum
+           number.
+         * If type ``float``, then ``min_samples_split_splitting`` represents a fraction
+           and ``max(2, ceil(min_samples_split_splitting * n_rows))`` is the minimum
            number of samples for each split.
     min_impurity_decrease : float (default = 0.0)
         The minimum decrease in impurity required for node to be split
@@ -452,10 +473,14 @@ class RandomForestRegressor(BaseRandomForestModel,
                                   <int> self.max_leaves,
                                   <float> max_feature_val,
                                   <int> self.n_bins,
-                                  <int> self.min_samples_leaf,
-                                  <int> self.min_samples_split,
+                                  <int> self.min_samples_leaf_splitting,
+                                  <int> self.min_samples_leaf_averaging,
+                                  <int> self.min_samples_split_splitting,
+                                  <int> self.min_samples_split_averaging,
                                   <float> self.min_impurity_decrease,
                                   <bool> self.bootstrap,
+                                  <bool> self.oob_honesty,
+                                  <bool> self.double_bootstrap,
                                   <int> self.n_estimators,
                                   <float> self.max_samples,
                                   <uint64_t> seed_val,

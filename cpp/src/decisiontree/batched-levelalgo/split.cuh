@@ -18,6 +18,7 @@
 
 #include <raft/linalg/unary_op.cuh>
 #include <raft/util/cuda_utils.cuh>
+#include <raft/core/handle.hpp>
 
 namespace ML {
 namespace DT {
@@ -43,8 +44,15 @@ struct Split {
   /** number of samples in the left child */
   int nLeft;
 
-  DI Split(DataT quesval, IdxT colid, DataT best_metric_val, IdxT nLeft)
-    : quesval(quesval), colid(colid), best_metric_val(best_metric_val), nLeft(nLeft)
+  /** number of training samples in the left child */
+  int nLeftAveraging;
+
+  /** number of training samples in the right child */
+  int nRightAveraging;
+
+  DI Split(DataT quesval, IdxT colid, DataT best_metric_val, IdxT nLeft, IdxT nLeftAveraging, IdxT nRightAveraging)
+    : quesval(quesval), colid(colid), best_metric_val(best_metric_val),
+      nLeft(nLeft), nLeftAveraging(nLeftAveraging), nRightAveraging(nRightAveraging)
   {
   }
 
@@ -53,6 +61,8 @@ struct Split {
     quesval = best_metric_val = Min;
     colid                     = -1;
     nLeft                     = 0;
+    nLeftAveraging            = 0;
+    nRightAveraging           = 0;
   }
 
   /**
@@ -68,6 +78,8 @@ struct Split {
     colid           = other.colid;
     best_metric_val = other.best_metric_val;
     nLeft           = other.nLeft;
+    nLeftAveraging  = other.nLeftAveraging;
+    nRightAveraging  = other.nRightAveraging;
     return *this;
   }
 
@@ -103,7 +115,9 @@ struct Split {
       auto co = raft::shfl(colid, id);
       auto be = raft::shfl(best_metric_val, id);
       auto nl = raft::shfl(nLeft, id);
-      update({qu, co, be, nl});
+      auto nlAvg = raft::shfl(nLeftAveraging, id);
+      auto nrAvg = raft::shfl(nRightAveraging, id);
+      update({qu, co, be, nl, nlAvg, nrAvg});
     }
   }
 
@@ -142,13 +156,19 @@ struct Split {
         split_reg.colid           = split->colid;
         split_reg.best_metric_val = split->best_metric_val;
         split_reg.nLeft           = split->nLeft;
+        split_reg.nLeftAveraging  = split->nLeftAveraging;
+        split_reg.nRightAveraging  = split->nRightAveraging;
         bool update_result =
-          split_reg.update({this->quesval, this->colid, this->best_metric_val, this->nLeft});
+          split_reg.update({
+              this->quesval, this->colid, this->best_metric_val, this->nLeft,
+              this->nLeftAveraging, this->nRightAveraging});
         if (update_result) {
           split->quesval         = split_reg.quesval;
           split->colid           = split_reg.colid;
           split->best_metric_val = split_reg.best_metric_val;
           split->nLeft           = split_reg.nLeft;
+          split->nLeftAveraging  = split_reg.nLeftAveraging;
+          split->nRightAveraging  = split_reg.nRightAveraging;
         }
         __threadfence();
         atomicExch(mutex, 0);
@@ -164,22 +184,46 @@ struct Split {
  * @param[in]  len    length of this array
  * @param[in]  s      cuda stream where to schedule work
  */
+template <typename DataT, typename IdxT>
+__global__ void init_splits_kernel(Split<DataT, IdxT>* splits, IdxT len)
+{
+  const int ix_thread = threadIdx.x + blockDim.x * blockIdx.x;
+  if (ix_thread < len) {
+    splits[ix_thread] = Split<DataT, IdxT>{};
+  }
+}
+
 template <typename DataT, typename IdxT, int TPB = 256>
 void initSplit(Split<DataT, IdxT>* splits, IdxT len, cudaStream_t s)
 {
-  auto op = [] __device__(Split<DataT, IdxT> * ptr, IdxT idx) { *ptr = Split<DataT, IdxT>(); };
-  raft::linalg::writeOnlyUnaryOp<Split<DataT, IdxT>, decltype(op), IdxT, TPB>(splits, len, op, s);
+  // The below is a potential replacement for "writeOnlyUnaryOp", which stopped working
+  // during my testing
+  // old version: 
+  // auto op = [] __device__(Split<DataT, IdxT> * ptr, IdxT idx) { *ptr = Split<DataT, IdxT>(); };
+  // raft::linalg::writeOnlyUnaryOp<Split<DataT, IdxT>, decltype(op), IdxT, TPB>(splits, len, op, s);
+
+  // potential new version
+  // auto op = [] __device__(auto idx) { return Split<DataT, IdxT>{}; };
+  // raft::handle_t handle{s};
+  // auto split_view = raft::make_device_vector_view(splits, len);
+  // raft::linalg::map_offset(handle, split_view, op);
+  
+  // custom kernel version
+  const int grid_dim = (len + TPB - 1) / TPB;
+  init_splits_kernel<<<grid_dim, TPB, 0, s>>>(splits, len);
 }
 
 template <typename DataT, typename IdxT, int TPB = 256>
 void printSplits(Split<DataT, IdxT>* splits, IdxT len, cudaStream_t s)
 {
   auto op = [] __device__(Split<DataT, IdxT> * ptr, IdxT idx) {
-    printf("quesval = %e, colid = %d, best_metric_val = %e, nLeft = %d\n",
+    printf("quesval = %e, colid = %d, best_metric_val = %e, nLeft = %d, nLeftAveraging = %d, nRightAveraging = %d\n",
            ptr->quesval,
            ptr->colid,
            ptr->best_metric_val,
-           ptr->nLeft);
+           ptr->nLeft,
+           ptr->nLeftAveraging,
+           ptr->nRightAveraging);
   };
   raft::linalg::writeOnlyUnaryOp<Split<DataT, IdxT>, decltype(op), IdxT, TPB>(splits, len, op, s);
   RAFT_CUDA_TRY(cudaDeviceSynchronize());

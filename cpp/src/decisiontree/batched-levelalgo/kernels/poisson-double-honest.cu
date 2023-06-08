@@ -24,8 +24,8 @@ namespace DT {
 using _DataT      = double;
 using _LabelT     = double;
 using _IdxT       = int;
-using _ObjectiveT = GammaObjectiveFunction<_DataT, _LabelT, _IdxT, false /*oob_honesty*/>;
-using _BinT       = AggregateBin;
+using _ObjectiveT = PoissonObjectiveFunction<_DataT, _LabelT, _IdxT, true /*oob_honesty*/>;
+using _BinT       = HonestAggregateBin;
 using _DatasetT   = Dataset<_DataT, _LabelT, _IdxT>;
 using _NodeT      = SparseTreeNode<_DataT, _LabelT, _IdxT>;
 }  // namespace DT

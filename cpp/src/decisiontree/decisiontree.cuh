@@ -222,7 +222,7 @@ tl::Tree<T, T> build_treelite_tree(const DT::TreeMetaDataNode<T, L>& rf_tree,
 
 class DecisionTree {
  public:
-  template <class DataT, class LabelT>
+  template <bool oob_honesty, class DataT, class LabelT>
   static std::shared_ptr<DT::TreeMetaDataNode<DataT, LabelT>> fit(
     const raft::handle_t& handle,
     const cudaStream_t s,
@@ -231,6 +231,8 @@ class DecisionTree {
     const int nrows,
     const LabelT* labels,
     rmm::device_uvector<int>* row_ids,
+    bool* split_row_mask,
+    const size_t n_avg_samples,
     int unique_labels,
     DecisionTreeParams params,
     uint64_t seed,
@@ -244,93 +246,75 @@ class DecisionTree {
       params.split_criterion = default_criterion;
     }
     using IdxT = int;
+    Dataset<DataT, LabelT, IdxT> dataset{
+        data,
+        labels,
+        nrows,
+        ncols,
+        int(row_ids->size()),
+        max(1, IdxT(params.max_features * ncols)),
+        row_ids->data(),
+        int(n_avg_samples),
+        split_row_mask,
+        unique_labels};
+
     // Dispatch objective
     if (not std::is_same<DataT, LabelT>::value and params.split_criterion == CRITERION::GINI) {
-      return Builder<GiniObjectiveFunction<DataT, LabelT, IdxT>>(handle,
-                                                                 s,
-                                                                 treeid,
-                                                                 seed,
-                                                                 params,
-                                                                 data,
-                                                                 labels,
-                                                                 nrows,
-                                                                 ncols,
-                                                                 row_ids,
-                                                                 unique_labels,
-                                                                 quantiles)
+      return Builder<GiniObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
+                                                                             s,
+                                                                             treeid,
+                                                                             seed,
+                                                                             params,
+                                                                             dataset,
+                                                                             quantiles)
         .train();
     } else if (not std::is_same<DataT, LabelT>::value and
                params.split_criterion == CRITERION::ENTROPY) {
-      return Builder<EntropyObjectiveFunction<DataT, LabelT, IdxT>>(handle,
-                                                                    s,
-                                                                    treeid,
-                                                                    seed,
-                                                                    params,
-                                                                    data,
-                                                                    labels,
-                                                                    nrows,
-                                                                    ncols,
-                                                                    row_ids,
-                                                                    unique_labels,
-                                                                    quantiles)
+      return Builder<EntropyObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
+                                                                                s,
+                                                                                treeid,
+                                                                                seed,
+                                                                                params,
+                                                                                dataset,
+                                                                                quantiles)
         .train();
     } else if (std::is_same<DataT, LabelT>::value and params.split_criterion == CRITERION::MSE) {
-      return Builder<MSEObjectiveFunction<DataT, LabelT, IdxT>>(handle,
-                                                                s,
-                                                                treeid,
-                                                                seed,
-                                                                params,
-                                                                data,
-                                                                labels,
-                                                                nrows,
-                                                                ncols,
-                                                                row_ids,
-                                                                unique_labels,
-                                                                quantiles)
-        .train();
-    } else if (std::is_same<DataT, LabelT>::value and
-               params.split_criterion == CRITERION::POISSON) {
-      return Builder<PoissonObjectiveFunction<DataT, LabelT, IdxT>>(handle,
-                                                                    s,
-                                                                    treeid,
-                                                                    seed,
-                                                                    params,
-                                                                    data,
-                                                                    labels,
-                                                                    nrows,
-                                                                    ncols,
-                                                                    row_ids,
-                                                                    unique_labels,
-                                                                    quantiles)
-        .train();
-    } else if (std::is_same<DataT, LabelT>::value and params.split_criterion == CRITERION::GAMMA) {
-      return Builder<GammaObjectiveFunction<DataT, LabelT, IdxT>>(handle,
-                                                                  s,
-                                                                  treeid,
-                                                                  seed,
-                                                                  params,
-                                                                  data,
-                                                                  labels,
-                                                                  nrows,
-                                                                  ncols,
-                                                                  row_ids,
-                                                                  unique_labels,
-                                                                  quantiles)
-        .train();
-    } else if (std::is_same<DataT, LabelT>::value and
-               params.split_criterion == CRITERION::INVERSE_GAUSSIAN) {
-      return Builder<InverseGaussianObjectiveFunction<DataT, LabelT, IdxT>>(handle,
+      return Builder<MSEObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
                                                                             s,
                                                                             treeid,
                                                                             seed,
                                                                             params,
-                                                                            data,
-                                                                            labels,
-                                                                            nrows,
-                                                                            ncols,
-                                                                            row_ids,
-                                                                            unique_labels,
+                                                                            dataset,
                                                                             quantiles)
+        .train();
+    } else if (std::is_same<DataT, LabelT>::value and
+               params.split_criterion == CRITERION::POISSON) {
+      return Builder<PoissonObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
+                                                                                s,
+                                                                                treeid,
+                                                                                seed,
+                                                                                params,
+                                                                                dataset,
+                                                                                quantiles)
+        .train();
+    } else if (std::is_same<DataT, LabelT>::value and params.split_criterion == CRITERION::GAMMA) {
+      return Builder<GammaObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
+                                                                              s,
+                                                                              treeid,
+                                                                              seed,
+                                                                              params,
+                                                                              dataset,
+                                                                              quantiles)
+        .train();
+    } else if (std::is_same<DataT, LabelT>::value and
+               params.split_criterion == CRITERION::INVERSE_GAUSSIAN) {
+      return Builder<InverseGaussianObjectiveFunction<DataT, LabelT, IdxT, oob_honesty>>(handle,
+                                                                                        s,
+                                                                                        treeid,
+                                                                                        seed,
+                                                                                        params,
+                                                                                        dataset,
+                                                                                        quantiles)
         .train();
     } else {
       ASSERT(false, "Unknown split criterion.");

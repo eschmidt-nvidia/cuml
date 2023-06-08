@@ -581,10 +581,14 @@ RF_params set_rf_params(int max_depth,
                         int max_leaves,
                         float max_features,
                         int max_n_bins,
-                        int min_samples_leaf,
-                        int min_samples_split,
+                        int min_samples_leaf_splitting,
+                        int min_samples_leaf_averaging,
+                        int min_samples_split_splitting,
+                        int min_samples_split_averaging,
                         float min_impurity_decrease,
                         bool bootstrap,
+                        bool oob_honesty,
+                        bool double_bootstrap,
                         int n_trees,
                         float max_samples,
                         uint64_t seed,
@@ -598,14 +602,19 @@ RF_params set_rf_params(int max_depth,
                       max_leaves,
                       max_features,
                       max_n_bins,
-                      min_samples_leaf,
-                      min_samples_split,
+                      min_samples_leaf_splitting,
+                      min_samples_leaf_averaging,
+                      min_samples_split_splitting,
+                      min_samples_split_averaging,
                       min_impurity_decrease,
                       split_criterion,
-                      max_batch_size);
+                      max_batch_size,
+                      oob_honesty);
   RF_params rf_params;
   rf_params.n_trees     = n_trees;
   rf_params.bootstrap   = bootstrap;
+  rf_params.oob_honesty = oob_honesty;
+  rf_params.double_bootstrap = double_bootstrap;
   rf_params.max_samples = max_samples;
   rf_params.seed        = seed;
   rf_params.n_streams   = min(cfg_n_streams, omp_get_max_threads());

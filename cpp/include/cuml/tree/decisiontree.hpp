@@ -44,13 +44,21 @@ struct DecisionTreeParams {
    */
   int max_n_bins;
   /**
-   * The minimum number of samples (rows) in each leaf node.
+   * The minimum number of splitting samples (rows) in each leaf node.
    */
-  int min_samples_leaf;
+  int min_samples_leaf_splitting;
+    /**
+   * The minimum number of averaging samples (rows) in each leaf node.
+   */
+  int min_samples_leaf_averaging;
   /**
-   * The minimum number of samples (rows) needed to split an internal node.
+   * The minimum number of splitting samples (rows) needed to split an internal node.
    */
-  int min_samples_split;
+  int min_samples_split_splitting;
+  /**
+   * The minimum number of averaging samples (rows) needed to split an internal node.
+   */
+  int min_samples_split_averaging;
   /**
    * Node split criterion. GINI and Entropy for classification, MSE for regression.
    */
@@ -66,6 +74,11 @@ struct DecisionTreeParams {
    * used only for batched-level algo
    */
   int max_batch_size;
+
+  /**
+   * Whether to use oob honesty features
+  */
+  bool oob_honesty;
 };
 
 /**
@@ -75,9 +88,13 @@ struct DecisionTreeParams {
  * @param[in] cfg_max_leaves: maximum leaves; default -1
  * @param[in] cfg_max_features: maximum number of features; default 1.0f
  * @param[in] cfg_max_n_bins: maximum number of bins; default 128
- * @param[in] cfg_min_samples_leaf: min. rows in each leaf node; default 1
- * @param[in] cfg_min_samples_split: min. rows needed to split an internal node;
+ * @param[in] cfg_min_samples_leaf_splitting: min. splitting rows in each leaf node; default 1
+ * @param[in] cfg_min_samples_leaf_averaging: min. averaging rows in each leaf node when oobhonesty enabled; 
+ *            default 1
+ * @param[in] cfg_min_samples_split_splitting: min. splitting rows needed to split an internal node;
  *            default 2
+ * @param[in] cfg_min_samples_split_averaging: min. averaging rows needed to split an internal
+ *            node when oobhonest enabled; default 2
  * @param[in] cfg_min_impurity_decrease: split a node only if its reduction in
  *                                       impurity is more than this value
  * @param[in] cfg_split_criterion: split criterion; default CRITERION_END,
@@ -91,11 +108,14 @@ void set_tree_params(DecisionTreeParams& params,
                      int cfg_max_leaves              = -1,
                      float cfg_max_features          = 1.0f,
                      int cfg_max_n_bins              = 128,
-                     int cfg_min_samples_leaf        = 1,
-                     int cfg_min_samples_split       = 2,
+                     int cfg_min_samples_leaf_splitting = 1,
+                     int cfg_min_samples_leaf_averaging = 1,
+                     int cfg_min_samples_split_splitting = 2,
+                     int cfg_min_samples_split_averaging = 2,
                      float cfg_min_impurity_decrease = 0.0f,
                      CRITERION cfg_split_criterion   = CRITERION_END,
-                     int cfg_max_batch_size          = 4096);
+                     int cfg_max_batch_size          = 4096,
+                     bool cfg_oob_honesty            = false);
 
 template <class T, class L>
 struct TreeMetaDataNode {

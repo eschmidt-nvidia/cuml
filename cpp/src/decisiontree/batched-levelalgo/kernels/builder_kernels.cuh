@@ -32,6 +32,7 @@ namespace DT {
 struct InstanceRange {
   std::size_t begin;
   std::size_t count;
+  std::size_t avg_count;
 };
 
 struct NodeWorkItem {
@@ -57,11 +58,16 @@ struct WorkloadInfo {
 template <typename SplitT, typename DataT, typename IdxT>
 HDI bool SplitNotValid(const SplitT& split,
                        DataT min_impurity_decrease,
-                       IdxT min_samples_leaf,
-                       std::size_t num_rows)
+                       IdxT min_samples_leaf_splitting,
+                       IdxT min_samples_leaf_averaging,
+                       std::size_t num_rows,
+                       const bool oob_honesty)
 {
-  return split.best_metric_val <= min_impurity_decrease || split.nLeft < min_samples_leaf ||
-         (IdxT(num_rows) - split.nLeft) < min_samples_leaf;
+    const int nLeftSplitting = split.nLeft - split.nLeftAveraging;
+    const int nRightSplitting = num_rows - split.nLeft - split.nRightAveraging;
+    return split.best_metric_val <= min_impurity_decrease ||
+           nLeftSplitting < min_samples_leaf_splitting || nRightSplitting < min_samples_leaf_splitting ||
+           (oob_honesty and (split.nLeftAveraging < min_samples_leaf_averaging || split.nRightAveraging < min_samples_leaf_averaging));
 }
 
 /* Returns 'dataset' rounded up to a correctly-aligned pointer of type OutT* */
@@ -71,7 +77,7 @@ DI OutT* alignPointer(InT dataset)
   return reinterpret_cast<OutT*>(raft::alignTo(reinterpret_cast<size_t>(dataset), sizeof(OutT)));
 }
 
-template <typename DataT, typename LabelT, typename IdxT, int TPB>
+template <typename DataT, typename LabelT, typename IdxT, int TPB, bool oob_honesty>
 __global__ void nodeSplitKernel(const IdxT max_depth,
                                 const IdxT min_samples_leaf,
                                 const IdxT min_samples_split,
@@ -347,7 +353,6 @@ template <typename DataT,
 __global__ void computeSplitKernel(BinT* histograms,
                                    IdxT n_bins,
                                    IdxT max_depth,
-                                   IdxT min_samples_split,
                                    IdxT max_leaves,
                                    const Dataset<DataT, LabelT, IdxT> dataset,
                                    const Quantiles<DataT, IdxT> quantiles,

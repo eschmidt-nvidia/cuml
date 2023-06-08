@@ -47,7 +47,7 @@ class NodeQueue {
   std::deque<NodeWorkItem> work_items_;
 
  public:
-  NodeQueue(DecisionTreeParams params, size_t max_nodes, size_t sampled_rows, int num_outputs)
+  NodeQueue(DecisionTreeParams params, size_t max_nodes, size_t sampled_rows, size_t avg_row_count, int num_outputs)
     : params(params), tree(std::make_shared<DT::TreeMetaDataNode<DataT, LabelT>>())
   {
     tree->num_outputs = num_outputs;
@@ -56,8 +56,8 @@ class NodeQueue {
     tree->leaf_counter  = 1;
     tree->depth_counter = 0;
     node_instances_.reserve(max_nodes);
-    node_instances_.emplace_back(InstanceRange{0, sampled_rows});
-    if (this->IsExpandable(tree->sparsetree.back(), 0)) {
+    node_instances_.emplace_back(InstanceRange{0, sampled_rows, avg_row_count});
+    if (this->IsExpandable(node_instances_.back(), 0)) {
       work_items_.emplace_back(NodeWorkItem{0, 0, node_instances_.back()});
     }
   }
@@ -79,16 +79,19 @@ class NodeQueue {
   }
 
   // This node is allowed to be expanded further (if its split gain is high enough)
-  bool IsExpandable(const NodeT& n, int depth)
+  bool IsExpandable(const InstanceRange& instance, int depth)
   {
     if (depth >= params.max_depth) return false;
-    if (int(n.InstanceCount()) < params.min_samples_split) return false;
+
+    int nTrain = int(instance.count - instance.avg_count);
+    if (nTrain < params.min_samples_split_splitting) return false;
+    if (params.oob_honesty and instance.avg_count < params.min_samples_split_averaging) return false;
     if (params.max_leaves != -1 && tree->leaf_counter >= params.max_leaves) return false;
     return true;
   }
 
-  template <typename SplitT>
-  void Push(const std::vector<NodeWorkItem>& work_items, SplitT* h_splits)
+  template <typename SplitT, typename DatasetT>
+  void Push(const std::vector<NodeWorkItem>& work_items, SplitT* h_splits, DatasetT& dataset)
   {
     // Update node queue based on splits
     for (std::size_t i = 0; i < work_items.size(); i++) {
@@ -96,12 +99,11 @@ class NodeQueue {
       auto item         = work_items[i];
       auto parent_range = node_instances_.at(item.idx);
       if (SplitNotValid(
-            split, params.min_impurity_decrease, params.min_samples_leaf, parent_range.count)) {
+            split, params.min_impurity_decrease, params.min_samples_leaf_splitting, params.min_samples_leaf_averaging, parent_range.count, params.oob_honesty)) {
         continue;
       }
 
       if (params.max_leaves != -1 && tree->leaf_counter >= params.max_leaves) break;
-
       // parent
       tree->sparsetree.at(item.idx) = NodeT::CreateSplitNode(split.colid,
                                                              split.quesval,
@@ -111,10 +113,10 @@ class NodeQueue {
       tree->leaf_counter++;
       // left
       tree->sparsetree.emplace_back(NodeT::CreateLeafNode(split.nLeft));
-      node_instances_.emplace_back(InstanceRange{parent_range.begin, std::size_t(split.nLeft)});
-
+      node_instances_.emplace_back(InstanceRange{parent_range.begin, std::size_t(split.nLeft), std::size_t(split.nLeftAveraging)});
+    
       // Do not add a work item if this child is definitely a leaf
-      if (this->IsExpandable(tree->sparsetree.back(), item.depth + 1)) {
+      if (this->IsExpandable(node_instances_.back(), item.depth + 1)) {
         work_items_.emplace_back(
           NodeWorkItem{tree->sparsetree.size() - 1, item.depth + 1, node_instances_.back()});
       }
@@ -122,13 +124,13 @@ class NodeQueue {
       // right
       tree->sparsetree.emplace_back(NodeT::CreateLeafNode(parent_range.count - split.nLeft));
       node_instances_.emplace_back(
-        InstanceRange{parent_range.begin + split.nLeft, parent_range.count - split.nLeft});
-
+        InstanceRange{parent_range.begin + split.nLeft, parent_range.count - split.nLeft, std::size_t(split.nRightAveraging)});
+    
       // Do not add a work item if this child is definitely a leaf
-      if (this->IsExpandable(tree->sparsetree.back(), item.depth + 1)) {
+      if (this->IsExpandable(node_instances_.back(), item.depth + 1)) {
         work_items_.emplace_back(
           NodeWorkItem{tree->sparsetree.size() - 1, item.depth + 1, node_instances_.back()});
-      }
+      } 
 
       // update depth
       tree->depth_counter = max(tree->depth_counter, item.depth + 1);
@@ -201,33 +203,21 @@ struct Builder {
           IdxT treeid,
           uint64_t seed,
           const DecisionTreeParams& p,
-          const DataT* data,
-          const LabelT* labels,
-          IdxT n_rows,
-          IdxT n_cols,
-          rmm::device_uvector<IdxT>* row_ids,
-          IdxT n_classes,
+          DatasetT& dataset,
           const QuantilesT& q)
     : handle(handle),
       builder_stream(s),
       treeid(treeid),
       seed(seed),
       params(p),
-      dataset{data,
-              labels,
-              n_rows,
-              n_cols,
-              int(row_ids->size()),
-              max(1, IdxT(params.max_features * n_cols)),
-              row_ids->data(),
-              n_classes},
+      dataset(dataset),
       quantiles(q),
       d_buff(0, builder_stream)
   {
     max_blocks_dimx = 1 + params.max_batch_size + dataset.n_sampled_rows / TPB_DEFAULT;
     ASSERT(q.quantiles_array != nullptr && q.n_bins_array != nullptr,
            "Currently quantiles need to be computed before this call!");
-    ASSERT(n_classes >= 1, "n_classes should be at least 1");
+    ASSERT(dataset.num_outputs >= 1, "num outputs should be at least 1");
 
     auto [device_workspace_size, host_workspace_size] = workspaceSize();
     d_buff.resize(device_workspace_size, builder_stream);
@@ -346,11 +336,11 @@ struct Builder {
     raft::common::nvtx::range fun_scope("Builder::train @builder.cuh [batched-levelalgo]");
     MLCommon::TimerCPU timer;
     NodeQueue<DataT, LabelT> queue(
-      params, this->maxNodes(), dataset.n_sampled_rows, dataset.num_outputs);
+      params, this->maxNodes(), dataset.n_sampled_rows, dataset.n_avg_rows, dataset.num_outputs);
     while (queue.HasWork()) {
       auto work_items                      = queue.Pop();
       auto [splits_host_ptr, splits_count] = doSplit(work_items);
-      queue.Push(work_items, splits_host_ptr);
+      queue.Push(work_items, splits_host_ptr, dataset);
     }
     auto tree = queue.GetTree();
     this->SetLeafPredictions(tree, queue.GetInstanceRanges());
@@ -473,14 +463,13 @@ struct Builder {
       computeSplit(c, n_blocks_dimx, n_large_nodes);
       RAFT_CUDA_TRY(cudaPeekAtLastError());
     }
-
     // create child nodes (or make the current ones leaf)
     auto smem_size = 2 * sizeof(IdxT) * TPB_DEFAULT;
     raft::common::nvtx::push_range("nodeSplitKernel @builder.cuh [batched-levelalgo]");
-    nodeSplitKernel<DataT, LabelT, IdxT, TPB_DEFAULT>
+    nodeSplitKernel<DataT, LabelT, IdxT, TPB_DEFAULT, ObjectiveT::oob_honesty>
       <<<work_items.size(), TPB_DEFAULT, smem_size, builder_stream>>>(params.max_depth,
-                                                                      params.min_samples_leaf,
-                                                                      params.min_samples_split,
+                                                                      params.min_samples_leaf_splitting,
+                                                                      params.min_samples_leaf_averaging,
                                                                       params.max_leaves,
                                                                       params.min_impurity_decrease,
                                                                       dataset,
@@ -528,14 +517,13 @@ struct Builder {
     int len_histograms = n_bins * n_classes * n_blocks_dimy * n_large_nodes;
     RAFT_CUDA_TRY(cudaMemsetAsync(histograms, 0, sizeof(BinT) * len_histograms, builder_stream));
     // create the objective function object
-    ObjectiveT objective(dataset.num_outputs, params.min_samples_leaf);
+    ObjectiveT objective(dataset.num_outputs, params.min_samples_leaf_splitting, params.min_samples_leaf_averaging);
     // call the computeSplitKernel
     raft::common::nvtx::range kernel_scope("computeSplitKernel @builder.cuh [batched-levelalgo]");
     computeSplitKernel<DataT, LabelT, IdxT, TPB_DEFAULT>
       <<<grid, TPB_DEFAULT, smem_size, builder_stream>>>(histograms,
                                                          params.max_n_bins,
                                                          params.max_depth,
-                                                         params.min_samples_split,
                                                          params.max_leaves,
                                                          dataset,
                                                          quantiles,
@@ -564,7 +552,7 @@ struct Builder {
     rmm::device_uvector<InstanceRange> d_instance_ranges(max_batch_size, builder_stream);
     rmm::device_uvector<DataT> d_leaves(max_batch_size * dataset.num_outputs, builder_stream);
 
-    ObjectiveT objective(dataset.num_outputs, params.min_samples_leaf);
+    ObjectiveT objective(dataset.num_outputs, params.min_samples_leaf_splitting, params.min_samples_leaf_averaging);
     for (std::size_t batch_begin = 0; batch_begin < tree->sparsetree.size();
          batch_begin += max_batch_size) {
       std::size_t batch_end  = min(batch_begin + max_batch_size, tree->sparsetree.size());

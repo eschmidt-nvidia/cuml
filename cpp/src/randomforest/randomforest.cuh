@@ -31,6 +31,10 @@
 
 #include <thrust/execution_policy.h>
 #include <thrust/sequence.h>
+#include <thrust/set_operations.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/zip_function.h>
+#include <thrust/sort.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -41,6 +45,19 @@
 
 #include <map>
 
+struct set_mask_functor {
+    const int n_rows;
+    set_mask_functor(const int n_rows) 
+      : n_rows(n_rows)
+    {}
+    
+    __host__ __device__
+    void operator()(const int& index, bool& output)
+    {
+      output = index < n_rows;
+    }
+};
+
 namespace ML {
 template <class T, class L>
 class RandomForest {
@@ -48,10 +65,13 @@ class RandomForest {
   RF_params rf_params;  // structure containing RF hyperparameters
   int rf_type;          // 0 for classification 1 for regression
 
-  void get_row_sample(int tree_id,
-                      int n_rows,
-                      rmm::device_uvector<int>* selected_rows,
-                      const cudaStream_t stream)
+  size_t get_row_sample(int tree_id,
+                        int n_rows,
+                        int n_sampled_rows,
+                        rmm::device_uvector<int>* selected_rows,
+                        rmm::device_uvector<bool>* split_row_mask,
+                        rmm::device_uvector<int>* tmp_row_vec,
+                        const cudaStream_t stream)
   {
     raft::common::nvtx::range fun_scope("bootstrapping row IDs @randomforest.cuh");
 
@@ -60,14 +80,58 @@ class RandomForest {
     rs      = DT::fnv1a32(rs, rf_params.seed);
     rs      = DT::fnv1a32(rs, tree_id);
     raft::random::Rng rng(rs, raft::random::GenPhilox);
+
     if (rf_params.bootstrap) {
       // Use bootstrapped sample set
-      rng.uniformInt<int>(selected_rows->data(), selected_rows->size(), 0, n_rows, stream);
-
+      rng.uniformInt<int>(selected_rows->data(), n_sampled_rows, 0, n_rows, stream);
     } else {
       // Use all the samples from the dataset
       thrust::sequence(thrust::cuda::par.on(stream), selected_rows->begin(), selected_rows->end());
     }
+    size_t num_avg_samples = 0;
+    
+    if (rf_params.oob_honesty and rf_params.bootstrap) {
+      // honesty doesn't make sense without bootstrapping -- all the obs were otherwise selected
+      num_avg_samples = n_sampled_rows;
+      assert(rf_params.bootstrap);
+    
+      // We'll have n_rows samples for splitting. 
+      // Need to sort the selected rows to be able to use thrust set difference
+      thrust::sort(thrust::cuda::par.on(stream), selected_rows->begin(), selected_rows->end());
+
+      // Get the set of observations that are not used for split
+      tmp_row_vec->resize(n_rows, stream);
+      auto iter_end = thrust::set_difference(
+          thrust::cuda::par.on(stream),
+          thrust::make_counting_iterator<int>(0),
+          thrust::make_counting_iterator<int>(n_sampled_rows),
+          selected_rows->begin(),
+          selected_rows->end(),
+          tmp_row_vec->begin());
+      
+      // Now tmp_row_vec is the observations available for the averaging set
+      size_t num_remaining_samples = iter_end - tmp_row_vec->begin();
+      tmp_row_vec->resize(num_remaining_samples, stream);
+
+      // Get the avg selected rows either as the remaining data, or bootstrapped again
+      if (rf_params.double_bootstrap) {
+        rng.uniformInt<int>(selected_rows->data() + n_sampled_rows, num_avg_samples, 0, num_remaining_samples, stream);
+        auto index_iter = thrust::make_permutation_iterator(tmp_row_vec->begin(), selected_rows->begin() + n_sampled_rows);
+      
+        thrust::copy(thrust::cuda::par.on(stream), index_iter, index_iter + num_avg_samples, selected_rows->begin() + n_sampled_rows);
+      } else {
+        thrust::copy(thrust::cuda::par.on(stream), tmp_row_vec->begin(), tmp_row_vec->end(), selected_rows->begin() + n_sampled_rows);
+      }
+      
+      // First n_rows goes to training, num_avg_samples goes to averaging.
+      auto begin_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
+          thrust::make_counting_iterator<int>(0), split_row_mask->begin()));
+      auto end_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
+          thrust::make_counting_iterator<int>(2 * n_sampled_rows), split_row_mask->end()));
+      thrust::for_each(thrust::cuda::par.on(stream), begin_zip_iterator, end_zip_iterator, thrust::make_zip_function(set_mask_functor(n_sampled_rows)));
+    }
+
+    return num_avg_samples;
   }
 
   void error_checking(const T* input, L* predictions, int n_rows, int n_cols, bool predict) const
@@ -156,16 +220,31 @@ class RandomForest {
     // Use a deque instead of vector because it can be used on objects with a deleted copy
     // constructor
     std::deque<rmm::device_uvector<int>> selected_rows;
+    std::deque<rmm::device_uvector<bool>> split_row_masks;
+    std::deque<rmm::device_uvector<int>> sampling_staging_vecs;
+
+    size_t max_sample_row_size = this->rf_params.oob_honesty ? n_sampled_rows * 2 : n_sampled_rows;
     for (int i = 0; i < n_streams; i++) {
-      selected_rows.emplace_back(n_sampled_rows, handle.get_stream_from_stream_pool(i));
+      auto s = handle.get_stream_from_stream_pool(i);
+      selected_rows.emplace_back(max_sample_row_size, s);
+      if (this->rf_params.oob_honesty) {
+        split_row_masks.emplace_back(max_sample_row_size, s);
+        sampling_staging_vecs.emplace_back(n_rows, s);
+      }
     }
 
 #pragma omp parallel for num_threads(n_streams)
     for (int i = 0; i < this->rf_params.n_trees; i++) {
       int stream_id = omp_get_thread_num();
       auto s        = handle.get_stream_from_stream_pool(stream_id);
-
-      this->get_row_sample(i, n_rows, &selected_rows[stream_id], s);
+      
+      rmm::device_uvector<int>* sampling_staging_vec = this->rf_params.oob_honesty ? &sampling_staging_vecs[stream_id] : nullptr;
+      rmm::device_uvector<bool>* split_row_mask = this->rf_params.oob_honesty ? &split_row_masks[stream_id] : nullptr;
+      auto n_avg_samples = this->get_row_sample(
+          i, n_rows, n_sampled_rows, &selected_rows[stream_id],
+          split_row_mask,
+          sampling_staging_vec,
+          s);
 
       /* Build individual tree in the forest.
         - input is a pointer to orig data that have n_cols features and n_rows rows.
@@ -175,19 +254,37 @@ class RandomForest {
           Expectation: Each tree node will contain (a) # n_sampled_rows and
           (b) a pointer to a list of row numbers w.r.t original data.
       */
-
-      forest->trees[i] = DT::DecisionTree::fit(handle,
-                                               s,
-                                               input,
-                                               n_cols,
-                                               n_rows,
-                                               labels,
-                                               &selected_rows[stream_id],
-                                               n_unique_labels,
-                                               this->rf_params.tree_params,
-                                               this->rf_params.seed,
-                                               quantiles,
-                                               i);
+      if (this->rf_params.oob_honesty) {
+        forest->trees[i] = DT::DecisionTree::fit<true>(handle,
+                                                       s,
+                                                       input,
+                                                       n_cols,
+                                                       n_rows,
+                                                       labels,
+                                                       &selected_rows[stream_id],
+                                                       split_row_masks[stream_id].data(),
+                                                       n_avg_samples,
+                                                       n_unique_labels,
+                                                       this->rf_params.tree_params,
+                                                       this->rf_params.seed,
+                                                       quantiles,
+                                                       i);
+      } else {
+        forest->trees[i] = DT::DecisionTree::fit<false>(handle,
+                                                        s,
+                                                        input,
+                                                        n_cols,
+                                                        n_rows,
+                                                        labels,
+                                                        &selected_rows[stream_id],
+                                                        nullptr,
+                                                        n_avg_samples,
+                                                        n_unique_labels,
+                                                        this->rf_params.tree_params,
+                                                        this->rf_params.seed,
+                                                        quantiles,
+                                                        i);
+      }
     }
     // Cleanup
     handle.sync_stream_pool();
