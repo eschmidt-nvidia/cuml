@@ -322,6 +322,20 @@ if(BUILD_CUML_CPP_LIBRARY)
         src/decisiontree/batched-levelalgo/kernels/mse-float.cu
         src/decisiontree/batched-levelalgo/kernels/poisson-double.cu
         src/decisiontree/batched-levelalgo/kernels/poisson-float.cu
+        
+        src/decisiontree/batched-levelalgo/kernels/entropy-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/entropy-float-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/gamma-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/gamma-float-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/gini-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/gini-float-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/inverse_gaussian-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/inverse_gaussian-float-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/mse-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/mse-float-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/poisson-double-honest.cu
+        src/decisiontree/batched-levelalgo/kernels/poisson-float-honest.cu
+
         src/decisiontree/batched-levelalgo/kernels/quantiles.cu
         src/decisiontree/decisiontree.cu)
   endif()

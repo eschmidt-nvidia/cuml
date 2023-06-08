@@ -35,12 +35,18 @@ void validity_check(const DecisionTreeParams params)
   ASSERT((params.max_n_bins > 0), "Invalid max_n_bins %d", params.max_n_bins);
   ASSERT((params.max_n_bins <= 1024), "max_n_bins should not be larger than 1024");
   ASSERT((params.split_criterion != 3), "MAE not supported.");
-  ASSERT((params.min_samples_leaf >= 1),
-         "Invalid value for min_samples_leaf %d. Should be >= 1.",
-         params.min_samples_leaf);
-  ASSERT((params.min_samples_split >= 2),
-         "Invalid value for min_samples_split: %d. Should be >= 2.",
-         params.min_samples_split);
+  ASSERT((params.min_samples_leaf_splitting >= 1),
+         "Invalid value for min_samples_leaf_splitting %d. Should be >= 1.",
+         params.min_samples_leaf_splitting);
+  ASSERT((not params.oob_honesty or params.min_samples_leaf_averaging >= 1),
+         "Invalid value for min_samples_leaf_averaging %d. Should be >= 1 if honesty enabled.",
+         params.min_samples_leaf_averaging);
+  ASSERT((params.min_samples_split_splitting >= 2),
+         "Invalid value for min_samples_split_splitting: %d. Should be >= 2.",
+         params.min_samples_split_splitting);
+  ASSERT((not params.oob_honesty or params.min_samples_split_averaging >= 2),
+         "Invalid value for min_samples_split_averaging: %d. Should be >= 2 if honesty enabled.",
+         params.min_samples_split_averaging);
 }
 
 /**
@@ -56,27 +62,34 @@ void validity_check(const DecisionTreeParams params)
  * @param[in] cfg_split_criterion: split criterion; default CRITERION_END,
  *            i.e., GINI for classification or MSE for regression
  * @param[in] cfg_max_batch_size: batch size for experimental backend
+ * @param[in] cfg_oob_honesty: Whether to use oob_honesty features
  */
 void set_tree_params(DecisionTreeParams& params,
                      int cfg_max_depth,
                      int cfg_max_leaves,
                      float cfg_max_features,
                      int cfg_max_n_bins,
-                     int cfg_min_samples_leaf,
-                     int cfg_min_samples_split,
+                     int cfg_min_samples_leaf_splitting,
+                     int cfg_min_samples_leaf_averaging,
+                     int cfg_min_samples_split_splitting,
+                     int cfg_min_samples_split_averaging,
                      float cfg_min_impurity_decrease,
                      CRITERION cfg_split_criterion,
-                     int cfg_max_batch_size)
+                     int cfg_max_batch_size,
+                     bool cfg_oob_honesty)
 {
-  params.max_depth             = cfg_max_depth;
-  params.max_leaves            = cfg_max_leaves;
-  params.max_features          = cfg_max_features;
-  params.max_n_bins            = cfg_max_n_bins;
-  params.min_samples_leaf      = cfg_min_samples_leaf;
-  params.min_samples_split     = cfg_min_samples_split;
-  params.split_criterion       = cfg_split_criterion;
-  params.min_impurity_decrease = cfg_min_impurity_decrease;
-  params.max_batch_size        = cfg_max_batch_size;
+  params.max_depth                   = cfg_max_depth;
+  params.max_leaves                  = cfg_max_leaves;
+  params.max_features                = cfg_max_features;
+  params.max_n_bins                  = cfg_max_n_bins;
+  params.min_samples_leaf_splitting   = cfg_min_samples_leaf_splitting;
+  params.min_samples_leaf_averaging  = cfg_min_samples_leaf_averaging;
+  params.min_samples_split_splitting  = cfg_min_samples_split_splitting;
+  params.min_samples_split_averaging = cfg_min_samples_split_averaging;
+  params.split_criterion             = cfg_split_criterion;
+  params.min_impurity_decrease       = cfg_min_impurity_decrease;
+  params.max_batch_size              = cfg_max_batch_size;
+  params.oob_honesty                 = cfg_oob_honesty;
   validity_check(params);
 }
 

@@ -71,8 +71,9 @@ class BaseRandomForestModel(Base):
 
     def __init__(self, *, split_criterion, n_streams=4, n_estimators=100,
                  max_depth=16, handle=None, max_features='auto', n_bins=128,
-                 bootstrap=True,
-                 verbose=False, min_samples_leaf=1, min_samples_split=2,
+                 bootstrap=True, oob_honesty=False, double_bootstrap=True,
+                 verbose=False, min_samples_leaf_splitting=1, min_samples_leaf_averaging=2,
+                 min_samples_split_splitting=2, min_samples_split_averaging=2,
                  max_samples=1.0, max_leaves=-1, accuracy_metric=None,
                  dtype=None, output_type=None, min_weight_fraction_leaf=None,
                  n_jobs=None, max_leaf_nodes=None, min_impurity_decrease=0.0,
@@ -135,8 +136,10 @@ class BaseRandomForestModel(Base):
             self.split_criterion = \
                 BaseRandomForestModel.criterion_dict[str(split_criterion)]
 
-        self.min_samples_leaf = min_samples_leaf
-        self.min_samples_split = min_samples_split
+        self.min_samples_leaf_averaging = min_samples_leaf_averaging
+        self.min_samples_split_averaging = min_samples_split_averaging
+        self.min_samples_leaf_splitting = min_samples_leaf_splitting
+        self.min_samples_split_splitting = min_samples_split_splitting
         self.min_impurity_decrease = min_impurity_decrease
         self.max_samples = max_samples
         self.max_leaves = max_leaves
@@ -144,6 +147,8 @@ class BaseRandomForestModel(Base):
         self.max_depth = max_depth
         self.max_features = max_features
         self.bootstrap = bootstrap
+        self.oob_honesty = oob_honesty
+        self.double_bootstrap = double_bootstrap
         self.n_bins = n_bins
         self.n_cols = None
         self.dtype = dtype
@@ -304,12 +309,18 @@ class BaseRandomForestModel(Base):
                           "to fit the estimator")
 
         max_feature_val = self._get_max_feat_val()
-        if type(self.min_samples_leaf) == float:
-            self.min_samples_leaf = \
-                math.ceil(self.min_samples_leaf * self.n_rows)
-        if type(self.min_samples_split) == float:
-            self.min_samples_split = \
-                max(2, math.ceil(self.min_samples_split * self.n_rows))
+        if type(self.min_samples_leaf_splitting) == float:
+            self.min_samples_leaf_splitting = \
+                math.ceil(self.min_samples_leaf_splitting * self.n_rows)
+        if type(self.min_samples_split_splitting) == float:
+            self.min_samples_split_splitting = \
+                max(2, math.ceil(self.min_samples_split_splitting * self.n_rows))
+        if type(self.min_samples_leaf_averaging) == float:
+            self.min_samples_leaf_averaging = \
+                math.ceil(self.min_samples_leaf_averaging * self.n_rows)
+        if type(self.min_samples_split_averaging) == float:
+            self.min_samples_split_averaging = \
+                max(2, math.ceil(self.min_samples_split_averaging * self.n_rows))
         return X_m, y_m, max_feature_val
 
     def _tl_handle_from_bytes(self, treelite_serialized_model):

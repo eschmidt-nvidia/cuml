@@ -75,6 +75,26 @@ struct RF_params {
    * tree.
    */
   bool bootstrap;
+
+  /** 
+   * Control whether to use honesty features to allow causal inferencing
+   * 
+   * This indicates that the values used for averaging in the leaf node predictions
+   * should be a disjoint set with the labels used for splits during training. 
+   * See this issue for more detail: https://github.com/rapidsai/cuml/issues/5253
+  */
+  bool oob_honesty;
+
+  /** 
+   * Honesty double bootstrapping
+   * 
+   * With double bootstrapping, the set of samples that was not sampled for training
+   * is again sampled with replacement. This leaves some samples that could be used 
+   * for double OOB prediction. TODO: how can we make the user aware of which 
+   * samples could be used for double OOB prediction?
+  */
+  bool double_bootstrap;
+
   /**
    * Ratio of dataset rows used while fitting each tree.
    */
@@ -192,10 +212,14 @@ RF_params set_rf_params(int max_depth,
                         int max_leaves,
                         float max_features,
                         int max_n_bins,
-                        int min_samples_leaf,
-                        int min_samples_split,
+                        int min_samples_leaf_splitting,
+                        int min_samples_leaf_averaging,
+                        int min_samples_split_splitting,
+                        int min_samples_split_averaging,
                         float min_impurity_decrease,
                         bool bootstrap,
+                        bool oob_honesty,
+                        bool double_bootstrap,
                         int n_trees,
                         float max_samples,
                         uint64_t seed,

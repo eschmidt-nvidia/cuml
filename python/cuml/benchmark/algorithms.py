@@ -171,7 +171,6 @@ class AlgorithmPair:
         """Runs the cuml-based algorithm's fit method on specified data"""
         all_args = {**self.shared_args, **self.cuml_args}
         all_args = {**all_args, **override_setup_args}
-
         if "cuml_setup_result" not in all_args:
             cuml_obj = self.cuml_class(**all_args)
         else:

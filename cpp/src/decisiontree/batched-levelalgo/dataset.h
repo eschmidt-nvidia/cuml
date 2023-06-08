@@ -35,6 +35,13 @@ struct Dataset {
   IdxT n_sampled_cols;
   /** indices of sampled rows */
   IdxT* row_ids;
+  /** n_avg_rows */
+  IdxT n_avg_rows;
+
+  /* boolean mask indicating whether a given row id should be used for splitting. 
+   * Unused / nullptr if oob_honesty is disabled.*/
+  bool* split_row_mask;
+  
   /** Number of classes or regression outputs*/
   IdxT num_outputs;
 };

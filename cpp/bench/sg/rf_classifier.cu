@@ -95,10 +95,14 @@ std::vector<Params> getInputs()
                        (1 << 20),           /* max_leaves */
                        0.3,                 /* max_features */
                        32,                  /* max_n_bins */
-                       3,                   /* min_samples_leaf */
-                       3,                   /* min_samples_split */
+                       3,                   /* min_samples_leaf_splitting */
+                       3,                   /* min_samples_leaf_averaging */
+                       3,                   /* min_samples_split_splitting */
+                       3,                   /* min_samples_split_averaging */
                        0.0f,                /* min_impurity_decrease */
                        true,                /* bootstrap */
+                       false,               /* oob_honesty */
+                       true,                /* double_bootstrap */
                        500,                 /* n_trees */
                        1.f,                 /* max_samples */
                        1234ULL,             /* seed */

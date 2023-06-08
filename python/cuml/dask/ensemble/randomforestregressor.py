@@ -82,6 +82,14 @@ class RandomForestRegressor(
          * If ``True``, each tree in the forest is built on a bootstrapped
            sample with replacement.
          * If ``False``, the whole dataset is used to build each tree.
+    oob_honesty : boolean (default = True)
+        Control oob_honesty.\n
+            * If ``True``, eachtree in the forest is built using disjoint sets for splitting and averaging
+            * If ``False``, the whole dataset is used to build each tree.
+    double_bootstrap : boolean (default = True)
+        Control bootstrapping in the averaging set. Only applies if oob_honesty is truer.\n
+            * If ``True``, each tree uses an averaging set which is sampled with replacement from the samples not used for splitting
+            * If ``False``, each tree uses an averaging set which is the set difference of all samples presented to the tree and the splitting set
     max_samples : float (default = 1.0)
         Ratio of dataset rows used while fitting each tree.
     max_depth : int (default = 16)
@@ -104,20 +112,34 @@ class RandomForestRegressor(
          * If ``None``, then ``max_features = 1.0``.
     n_bins : int (default = 128)
         Maximum number of bins used by the split algorithm per feature.
-    min_samples_leaf : int or float (default = 1)
-        The minimum number of samples (rows) in each leaf node.\n
-         * If type ``int``, then ``min_samples_leaf`` represents the minimum
+    min_samples_leaf_splitting : int or float (default = 1)
+        The minimum number of training samples (rows) in each leaf node.\n
+         * If type ``int``, then ``min_samples_leaf_splitting`` represents the minimum
            number.
-         * If ``float``, then ``min_samples_leaf`` represents a fraction and
-           ``ceil(min_samples_leaf * n_rows)`` is the minimum number of
+         * If ``float``, then ``min_samples_leaf_splitting`` represents a fraction and
+           ``ceil(min_samples_leaf_splitting * n_rows)`` is the minimum number of
            samples for each leaf node.
-    min_samples_split : int or float (default = 2)
-        The minimum number of samples required to split an internal node.\n
-         * If type ``int``, then ``min_samples_split`` represents the minimum
+    min_samples_leaf_averaging : int or float (default = 2)
+        The minimum number of averaging samples (rows, oob_honesty) in each leaf node.\n
+         * If type ``int``, then ``min_samples_leaf_averaging`` represents the minimum
            number.
-         * If type ``float``, then ``min_samples_split`` represents a fraction
-           and ``ceil(min_samples_split * n_rows)`` is the minimum number of
-           samples for each split.
+         * If ``float``, then ``min_samples_leaf_averaging`` represents a fraction and
+           ``ceil(min_samples_leaf_averaging * n_rows)`` is the minimum number of
+           samples for each leaf node.
+    min_samples_split_splitting : int or float (default = 2)
+        The minimum number of trainingsamples required to split an internal node.\n
+         * If type ``int``, then min_samples_split_splitting represents the minimum
+           number.
+         * If type ``float``, then ``min_samples_split_splitting`` represents a fraction
+           and ``max(2, ceil(min_samples_split_splitting * n_rows))`` is the minimum
+           number of samples for each split.
+    min_samples_split_averaging : int or float (default = 2)
+        The minimum number of averaging samples (oob_honesty) required to split an internal node.\n
+         * If type ``int``, then min_samples_split_splitting represents the minimum
+           number.
+         * If type ``float``, then ``min_samples_split_splitting`` represents a fraction
+           and ``max(2, ceil(min_samples_split_splitting * n_rows))`` is the minimum
+           number of samples for each split.
     accuracy_metric : string (default = 'r2')
         Decides the metric used to evaluate the performance of the model.
         In the 0.16 release, the default scoring metric was changed
