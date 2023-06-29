@@ -43,6 +43,8 @@
 #include <thrust/random.h>
 #include <thrust/shuffle.h>
 #include <thrust/transform.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
 
 #include <gtest/gtest.h>
 
@@ -237,7 +239,10 @@ auto TrainScore(
                                       0,
                                       params.split_criterion,
                                       params.n_streams,
-                                      128);
+                                      128,
+                                      0,
+                                      0,
+                                      -1);
 
   auto forest     = std::make_shared<RandomForestMetaData<DataT, LabelT>>();
   auto forest_ptr = forest.get();
@@ -571,9 +576,8 @@ TEST(RfTests, IntegerOverflow)
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, CRITERION::MSE, 4, 128);
+    set_rf_params(3, 100, 1.0, 256, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0, -1);
   fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
-
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -591,6 +595,332 @@ TEST(RfTests, IntegerOverflow)
                                    1,
                                    0,
                                    nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+namespace {
+  struct TransformFunctor {
+    __device__ float operator()(float input) {
+      return roundf(input);
+    }
+  };  
+}
+
+
+TEST(RfTests, Honesty)
+{
+  std::size_t m = 10000;
+  std::size_t n = 2150;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(4);
+  r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 1, 128, 0, 0, -1);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, SmallHonestFolds)
+{
+  std::size_t m = 1000;
+  std::size_t n = 10;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(42);
+  r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 1, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+
+TEST(RfTests, SmallHonestFoldsWithFallback)
+{
+  std::size_t m = 1000;
+  std::size_t n = 10;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(42);
+  r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, SmallDishonestFoldsWithFallback)
+{
+  std::size_t m = 1000;
+  std::size_t n = 10;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(42);
+  r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, HonestFolds)
+{
+  std::size_t m = 10000;
+  std::size_t n = 2150;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(4);
+  r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 4, 128, 2, 2, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, HonestGroups)
+{
+  std::size_t m = 10000;
+  std::size_t n = 2150;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(4);
+  r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, DishonestFolds)
+{
+  std::size_t m = 10000;
+  std::size_t n = 2150;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(4);
+  r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 5, 1.0, 0, CRITERION::MSE, 4, 128, 2, 2, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
   fil::forest_variant forest_variant;
   fil::from_treelite(handle, &forest_variant, model, &tl_params);
   fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
@@ -813,7 +1143,7 @@ INSTANTIATE_TEST_CASE_P(RfTests, RFQuantileVariableBinsTestD, ::testing::ValuesI
 
 TEST(RfTest, TextDump)
 {
-  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, GINI, 1, 128);
+  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, GINI, 1, 128, 0, 0, -1);
   auto forest         = std::make_shared<RandomForestMetaData<float, int>>();
 
   std::vector<float> X_host      = {1, 2, 3, 6, 7, 8};
@@ -954,7 +1284,6 @@ class ObjectiveTest : public ::testing::TestWithParam<ObjectiveTestParameters> {
                     (n_right / n) * right_mse);  // gain in long form without proxy
 
     // edge cases
-    printf("gain %f\n", gain);
     if (n_left < params.min_samples_leaf_splitting or n_right < params.min_samples_leaf_splitting)
       return -std::numeric_limits<DataT>::max();
     else
@@ -1338,6 +1667,55 @@ TEST_P(GiniObjectiveTestF, giniObjectiveTest) {}
 INSTANTIATE_TEST_CASE_P(RfTests,
                         GiniObjectiveTestF,
                         ::testing::ValuesIn(gini_objective_test_parameters));
+
+TEST(rf_unit_tests, lower_bound) {
+  // Initialize sorted array
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  int* sorted_array;
+  int* input_array;
+  int* output_array;
+  const int num_inputs = 200;
+  const int max_val = 100;
+  cudaMalloc(&sorted_array, num_inputs * sizeof(int));
+  cudaMalloc(&input_array, num_inputs * sizeof(int));
+  cudaMalloc(&output_array, num_inputs * sizeof(int));
+
+  // Generate random samples
+  raft::random::Rng rng(42, raft::random::GenPhilox);
+  rng.uniformInt<int>(input_array, num_inputs, 0, max_val, stream);
+  cudaMemcpy(sorted_array, input_array, num_inputs * sizeof(int), cudaMemcpyDefault);
+  thrust::sort(thrust::cuda::par.on(stream),
+      sorted_array,
+      sorted_array + num_inputs);
+
+  int* new_end = thrust::unique(thrust::cuda::par.on(stream),
+          sorted_array,
+          sorted_array + num_inputs);
+
+  const int n_unique = new_end - sorted_array;       
+
+  lower_bound_test(sorted_array, input_array, n_unique, num_inputs, output_array, stream);
+
+  std::vector<int> input_vec(num_inputs);
+  std::vector<int> sorted_vec(n_unique);
+  std::vector<int> gpu_output_vec(num_inputs);
+
+  cudaMemcpy(input_vec.data(), input_array, num_inputs * sizeof(int), cudaMemcpyDefault);
+  cudaMemcpy(gpu_output_vec.data(), output_array, num_inputs * sizeof(int), cudaMemcpyDefault);
+  cudaMemcpy(sorted_vec.data(), sorted_array, n_unique * sizeof(int), cudaMemcpyDefault);
+
+  for (int ix = 0; ix < num_inputs; ++ix) {
+    int res = std::distance(sorted_vec.begin(),
+        std::lower_bound(sorted_vec.begin(), sorted_vec.end(), input_vec[ix]));
+    ASSERT_EQ(res, gpu_output_vec[ix]);
+  }
+
+  // Compare against std::lower_bound
+  cudaFree(sorted_array);
+  cudaFree(input_array);
+  cudaFree(output_array);
+}
 
 }  // end namespace DT
 }  // end namespace ML

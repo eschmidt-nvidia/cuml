@@ -594,7 +594,10 @@ RF_params set_rf_params(int max_depth,
                         uint64_t seed,
                         CRITERION split_criterion,
                         int cfg_n_streams,
-                        int max_batch_size)
+                        int max_batch_size,
+                        int minTreesPerGroupFold,
+                        int foldGroupSize,
+                        int group_col_idx)
 {
   DT::DecisionTreeParams tree_params;
   DT::set_tree_params(tree_params,
@@ -620,6 +623,9 @@ RF_params set_rf_params(int max_depth,
   rf_params.n_streams   = min(cfg_n_streams, omp_get_max_threads());
   if (n_trees < rf_params.n_streams) rf_params.n_streams = n_trees;
   rf_params.tree_params = tree_params;
+  rf_params.minTreesPerGroupFold = minTreesPerGroupFold;
+  rf_params.foldGroupSize = foldGroupSize;
+  rf_params.group_col_idx = group_col_idx;
   validity_check(rf_params);
   return rf_params;
 }

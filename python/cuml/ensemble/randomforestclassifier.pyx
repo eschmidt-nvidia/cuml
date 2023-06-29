@@ -258,7 +258,34 @@ class RandomForestClassifier(BaseRandomForestModel,
         type. If None, the output type set at the module level
         (`cuml.global_settings.output_type`) will be used. See
         :ref:`output-data-type-configuration` for more info.
+    minTreesPerGroupFold : int (default = 0)
+        Comment from rforestry:
+        The number of trees which we make sure have been created leaving
+        out each fold (each fold is a set of randomly selected groups).
+         This is 0 by default, so we will not give any special treatment to
+        the groups when sampling observations, however if this is set to a positive integer, we
+        modify the bootstrap sampling scheme to ensure that exactly that many trees
+        have each group left out. We do this by, for each fold, creating minTreesPerGroupFold
+        trees which are built on observations sampled from the set of training observations
+        which are not in a group in the current fold. The folds form a random partition of
+        all of the possible groups, each of size foldGroupSize. This means we create at
+        least # folds * minTreesPerGroupFold trees for the forest.
+        If ntree > # folds * minTreesPerGroupFold, we create
+        max(# folds * minTreesPerGroupFold, ntree) total trees, in which at least minTreesPerGroupFold
+        are created leaving out each fold.
 
+    foldGroupSize : int (default = 1)
+        Comment from rforestry:
+        The number of groups that are selected randomly for each fold to be
+        left out when using minTreesPerGroupFold. When minTreesPerGroupFold is set and foldGroupSize is
+        set, all possible groups will be partitioned into folds, each containing foldGroupSize unique groups
+        (if foldGroupSize doesn't evenly divide the number of groups, a single fold will be smaller,
+        as it will contain the remaining groups). Then minTreesPerGroupFold are grown with each
+        entire fold of groups left out.
+
+    group_col_idx : int (default = -1)
+        The numeric index of the column to be used for group processing
+        
     Notes
     -----
     **Known Limitations**\n
@@ -501,7 +528,10 @@ class RandomForestClassifier(BaseRandomForestModel,
                                   <uint64_t> seed_val,
                                   <CRITERION> self.split_criterion,
                                   <int> self.n_streams,
-                                  <int> self.max_batch_size)
+                                  <int> self.max_batch_size,
+                                  <int> self.minTreesPerGroupFold,
+                                  <int> self.foldGroupSize,
+                                  <int> self.group_col_idx)
 
         if self.dtype == np.float32:
             fit(handle_[0],
