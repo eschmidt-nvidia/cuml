@@ -44,8 +44,11 @@ from cuml.prims.label.classlabels import make_monotonic, check_labels
 class BaseRandomForestModel(Base):
     _param_names = ['n_estimators', 'max_depth', 'handle',
                     'max_features', 'n_bins',
-                    'split_criterion', 'min_samples_leaf',
-                    'min_samples_split',
+                    'split_criterion',
+                    'min_samples_leaf_splitting',
+                    'min_samples_leaf_averaging',
+                    'min_samples_split_splitting',
+                    'min_samples_split_averaging',
                     'min_impurity_decrease',
                     'bootstrap',
                     'verbose', 'max_samples',
@@ -55,7 +58,8 @@ class BaseRandomForestModel(Base):
                     'output_type', 'min_weight_fraction_leaf', 'n_jobs',
                     'max_leaf_nodes', 'min_impurity_split', 'oob_score',
                     'random_state', 'warm_start', 'class_weight',
-                    'criterion']
+                    'criterion', 'minTreesPerGroupFold', 'foldGroupSize',
+                    'group_col_idx']
 
     criterion_dict = {'0': GINI, 'gini': GINI,
                       '1': ENTROPY, 'entropy': ENTROPY,
@@ -80,7 +84,11 @@ class BaseRandomForestModel(Base):
                  min_impurity_split=None, oob_score=None, random_state=None,
                  warm_start=None, class_weight=None,
                  criterion=None,
-                 max_batch_size=4096, **kwargs):
+                 max_batch_size=4096,
+                 minTreesPerGroupFold=0,
+                 foldGroupSize=1,
+                 group_col_idx=-1,
+                 **kwargs):
 
         sklearn_params = {"criterion": criterion,
                           "min_weight_fraction_leaf": min_weight_fraction_leaf,
@@ -161,6 +169,9 @@ class BaseRandomForestModel(Base):
         self.model_pbuf_bytes = bytearray()
         self.treelite_handle = None
         self.treelite_serialized_model = None
+        self.minTreesPerGroupFold = minTreesPerGroupFold
+        self.foldGroupSize = foldGroupSize
+        self.group_col_idx = group_col_idx
 
     def _get_max_feat_val(self) -> float:
         if type(self.max_features) == int:

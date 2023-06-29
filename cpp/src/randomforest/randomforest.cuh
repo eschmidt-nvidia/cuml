@@ -35,6 +35,7 @@
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/zip_function.h>
 #include <thrust/sort.h>
+#include <thrust/unique.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -58,28 +59,330 @@ struct set_mask_functor {
     }
 };
 
+namespace {
+
+__global__ void log10(int* array) {
+  for (int ix = 0; ix < 10; ++ix) {
+    printf("array %d = %d\n", ix, array[ix]);
+  }
+}
+
+__global__ void log10groups(const int* row_ids, const int* group_ids) {
+  for (int ix = 0; ix < 10; ++ix) {
+    printf("group ix %d, row %d = %d\n", ix, row_ids[ix], group_ids[row_ids[ix]]);
+  }
+}
+
+void assign_groups_to_folds(
+  int n_groups,
+  int n_folds,
+  int fold_size,
+  std::vector<std::vector<int>> & fold_memberships,
+  std::mt19937& rng) 
+{
+    std::vector<int> group_indices(n_groups);
+    std::iota(group_indices.begin(), group_indices.end(), 0);
+
+    std::shuffle(group_indices.begin(), group_indices.end(), rng);
+          
+    for (int ix_fold = 0; ix_fold < n_folds - 1; ++ix_fold) {
+      std::copy(group_indices.begin() + ix_fold*fold_size,
+                group_indices.begin() + (ix_fold+1)*fold_size,
+                fold_memberships[ix_fold].begin());
+      // std::sort(fold_memberships[ix_fold].begin(), fold_memberships[ix_fold].end());
+    }
+
+    // Last fold could be smaller
+    const int last_fold_start = (n_folds - 1) * fold_size;
+    const int last_fold_size = n_groups - last_fold_start;
+    fold_memberships[n_folds - 1].resize(last_fold_size);
+    for (int ix = 0; ix < last_fold_size; ++ix) {
+      fold_memberships[n_folds - 1][ix] = group_indices[last_fold_start + ix];
+    }
+}
+
+template<typename T, typename U>
+__device__ int lower_bound(const T search_val, const U* array, int count) {
+  int it, step;
+  int first = 0;
+  while (count > 0) {
+    step = count / 2;
+    it = first + step;
+    if (array[it] < search_val) {
+      first = ++it;
+      count -= step + 1;
+    } else {
+      count = step;
+    }
+  }
+  return first;
+}
+
+template<typename T>
+struct UniqueTransformFunctor {
+  const T* unique_groups;
+  const int num_groups;
+  UniqueTransformFunctor(const T* unique_groups, const int num_groups)
+    : unique_groups(unique_groups),
+      num_groups(num_groups)
+  {}
+
+  __device__ int operator()(T group_val) {
+    int res = lower_bound(group_val, unique_groups, num_groups);
+    return res;
+  }
+};
+
+struct LeaveOutSamplesCopyIfFunctor {
+  
+  int* remaining_groups;
+  const int* sample_group_ids;
+  const int num_rem_groups;
+  LeaveOutSamplesCopyIfFunctor(
+      rmm::device_uvector<int>* remaining_groups,
+      const int* sample_group_ids)
+    : remaining_groups(remaining_groups->data()),
+      sample_group_ids(sample_group_ids),
+      num_rem_groups(remaining_groups->size())
+  {}
+
+  __device__ bool operator()(const int ix_sample) {
+    // Do a quick lower_bound search
+    const int group_id = sample_group_ids[ix_sample];
+    int it = lower_bound(group_id, remaining_groups, num_rem_groups);
+    return remaining_groups[it] == group_id;
+  }
+};
+
+void generate_row_indices_from_remaining_groups(
+    rmm::device_uvector<int>* remaining_groups,
+    rmm::device_uvector<int>* remaining_samples,
+    const int* sample_group_ids,
+    const size_t num_samples,
+    const cudaStream_t stream,
+    raft::random::Rng& rng)
+{
+  // From the remaining groups, we need to generate the remaining samples
+  // We're going to copy_if the indices to remaining_samples, only if the sample group id is part of the remaining groups
+
+  // We want to sort remaining groups so that we can do the search in logN time.
+  thrust::sort(thrust::cuda::par.on(stream), remaining_groups->begin(), remaining_groups->end());
+
+  LeaveOutSamplesCopyIfFunctor predicate{remaining_groups, sample_group_ids};
+
+  auto output_it = thrust::copy_if(
+      thrust::cuda::par.on(stream),
+      thrust::make_counting_iterator<int>(0),
+      thrust::make_counting_iterator<int>(num_samples),
+      remaining_samples->begin(),
+      predicate);
+  auto dist = thrust::distance(remaining_samples->begin(), output_it);
+  remaining_samples->resize(dist, stream);
+}
+
+void sample_rows_from_remaining_rows(
+    rmm::device_uvector<int>* remaining_samples,
+    rmm::device_uvector<int>* sample_output,
+    rmm::device_uvector<int>* workspace,
+    const size_t num_samples,
+    const size_t sample_output_offset,
+    const cudaStream_t stream,
+    raft::random::Rng& rng)
+{
+  // This will do the actual permutation / shuffle operation
+  rng.uniformInt<int>(workspace->data(), num_samples, 0, remaining_samples->size(), stream);
+
+  auto index_iter = thrust::make_permutation_iterator(remaining_samples->begin(), workspace->begin());
+
+  thrust::copy(thrust::cuda::par.on(stream), index_iter, index_iter + num_samples, sample_output->begin() + sample_output_offset);
+}
+
+void leave_groups_out_sample(
+    rmm::device_uvector<int>* remaining_groups,
+    rmm::device_uvector<int>* remaining_samples,
+    rmm::device_uvector<int>* sample_output,
+    rmm::device_uvector<int>* workspace,
+    const int* sample_group_ids,
+    std::vector<int>& remaining_groups_host,
+    const size_t num_samples,
+    const size_t sample_output_offset,
+    const cudaStream_t stream,
+    raft::random::Rng& rng)
+{
+  raft::update_device(remaining_groups->data(), remaining_groups_host.data(), 
+      remaining_groups_host.size(), stream);
+  remaining_groups->resize(remaining_groups_host.size(), stream);
+  
+  generate_row_indices_from_remaining_groups(
+    remaining_groups, remaining_samples, sample_group_ids, 
+    num_samples, stream, rng);
+  sample_rows_from_remaining_rows(
+    remaining_samples,
+    sample_output,
+    workspace,
+    num_samples,
+    sample_output_offset,
+    stream,
+    rng);
+}
+
+void update_averaging_mask(
+  rmm::device_uvector<bool>* split_row_mask,
+  const size_t n_sampled_rows,
+  const cudaStream_t stream)
+{
+    // First n_rows goes to training, num_avg_samples goes to averaging.
+    auto begin_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
+        thrust::make_counting_iterator<int>(0), split_row_mask->begin()));
+    auto end_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
+        thrust::make_counting_iterator<int>(2 * n_sampled_rows), split_row_mask->end()));
+    thrust::for_each(thrust::cuda::par.on(stream), begin_zip_iterator, end_zip_iterator, 
+        thrust::make_zip_function(set_mask_functor(n_sampled_rows)));
+}
+
+} // end anon namespace
+
 namespace ML {
+
+void lower_bound_test(
+    const int* search_array,
+    const int* input_vals,
+    const int num_search_vals,
+    const int num_inputs,
+    int* output_array,
+    const cudaStream_t stream) 
+{
+  UniqueTransformFunctor transform_fn{search_array, num_search_vals};
+  thrust::transform(
+      thrust::cuda::par.on(stream),
+      input_vals,
+      input_vals + num_inputs,
+      output_array,
+      transform_fn);
+}
+
 template <class T, class L>
 class RandomForest {
  protected:
   RF_params rf_params;  // structure containing RF hyperparameters
   int rf_type;          // 0 for classification 1 for regression
 
-  size_t get_row_sample(int tree_id,
-                        int n_rows,
+  size_t get_row_sample(const int tree_id,
+                        const int n_rows,
                         int n_sampled_rows,
-                        rmm::device_uvector<int>* selected_rows,
-                        rmm::device_uvector<bool>* split_row_mask,
-                        rmm::device_uvector<int>* tmp_row_vec,
+                        rmm::device_uvector<int>* selected_rows, // 2x n sampled rows
+                        rmm::device_uvector<bool>* split_row_mask, // 2x n_sampled rows
+                        rmm::device_uvector<int>* remaining_groups, // 1x n_groups
+                        rmm::device_uvector<int>* remaining_samples, // 1x n_sampled_rows
+                        rmm::device_uvector<int>* workspace, // 1x n sampled rows
+                        int* groups,
+                        const int n_groups,
+                        const std::vector<std::vector<int>>& fold_memberships, // each group belongs to one fold
                         const cudaStream_t stream)
   {
+    // Todo: split group_fold_rng across threads
     raft::common::nvtx::range fun_scope("bootstrapping row IDs @randomforest.cuh");
 
     // Hash these together so they are uncorrelated
-    auto rs = DT::fnv1a32_basis;
-    rs      = DT::fnv1a32(rs, rf_params.seed);
-    rs      = DT::fnv1a32(rs, tree_id);
-    raft::random::Rng rng(rs, raft::random::GenPhilox);
+    auto random_seed = DT::fnv1a32_basis;
+    random_seed      = DT::fnv1a32(random_seed, rf_params.seed);
+    random_seed      = DT::fnv1a32(random_seed, tree_id);
+    raft::random::Rng rng(random_seed, raft::random::GenPhilox);
+
+    // generate the random state needed for cpu-side sampling
+    auto cpu_random_seed = DT::fnv1a32(random_seed, 1);
+    std::random_device rd;
+    std::mt19937 group_fold_rng(rd());
+    group_fold_rng.seed(cpu_random_seed);
+    
+    std::vector<std::vector<int>> honest_group_assignments(2);
+    auto& splitting_groups = honest_group_assignments[0];
+    auto& averaging_groups = honest_group_assignments[1];
+    if (n_groups > 0) {
+      // Special handling for groups. We don't support split ratio honesty
+      const std::vector<int>* current_fold_groups;
+      std::vector<int> restricted_group_ixs;
+      std::vector<int> restricted_group_ixs_diff;
+      int restricted_ix_size = n_groups;
+      if (rf_params.minTreesPerGroupFold > 0) {
+        const int current_fold = tree_id / rf_params.minTreesPerGroupFold;
+        current_fold_groups = &fold_memberships[current_fold];
+        restricted_group_ixs.resize(n_groups);
+        std::iota(restricted_group_ixs.begin(), restricted_group_ixs.end(), 0);
+        
+        restricted_ix_size = n_groups - current_fold_groups->size();
+        restricted_group_ixs_diff.reserve(restricted_ix_size);
+        std::set_difference(restricted_group_ixs.begin(),
+                            restricted_group_ixs.end(),
+                            current_fold_groups->begin(),
+                            current_fold_groups->end(),
+                            std::inserter(restricted_group_ixs_diff, restricted_group_ixs_diff.begin()));
+      }
+
+      if (rf_params.oob_honesty) {
+        const float split_ratio = 0.632; 
+
+        if (rf_params.minTreesPerGroupFold > 0) {
+          // Doing group / fold "leave-out" logic
+          int honest_split_size = split_ratio * (n_groups - current_fold_groups->size());
+
+          splitting_groups.resize(honest_split_size);
+          averaging_groups.resize(restricted_ix_size - honest_split_size);
+
+          assign_groups_to_folds(
+              restricted_ix_size,
+              2,
+              honest_split_size,
+              honest_group_assignments,
+              group_fold_rng);
+          
+          // Replace indices with the actual groups
+          for (int ix_group = 0; ix_group < honest_split_size; ix_group++) {
+            honest_group_assignments[0][ix_group] = restricted_group_ixs_diff[honest_group_assignments[0][ix_group]];
+          }
+          
+          for (int ix_group = 0; ix_group < restricted_ix_size - honest_split_size; ix_group++) {
+            honest_group_assignments[1][ix_group] = restricted_group_ixs_diff[honest_group_assignments[1][ix_group]];
+          }
+        } else {
+          // Here we're not doing folds, we're partitioning the groups directly. We're also not leaving out groups?
+          // Easy enough so I'll add it, to match rforestry functionality
+          int honest_split_size = std::round(split_ratio * static_cast<double>(n_groups));
+
+          // Avoid empty set
+          if (honest_split_size == n_groups) {
+            honest_split_size = n_groups - 1;
+          } else if (honest_split_size == 0) {
+            honest_split_size = 1;
+          }
+
+          splitting_groups.resize(honest_split_size);
+          averaging_groups.resize(honest_split_size);
+          assign_groups_to_folds(
+              n_groups, 
+              2,
+              honest_split_size,
+              honest_group_assignments,
+              group_fold_rng);
+        }
+
+        leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
+            groups, splitting_groups, n_sampled_rows, 0, stream, rng);
+
+        leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
+            groups, averaging_groups, n_sampled_rows, n_sampled_rows, stream, rng);
+
+        update_averaging_mask(split_row_mask, n_sampled_rows, stream);
+
+        return n_sampled_rows; // averaging sample count
+
+      } else if (rf_params.minTreesPerGroupFold > 0) {
+        // Just don't use samples from the current fold for splitting. No averaging.
+        leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
+            groups, restricted_group_ixs_diff, n_sampled_rows, 0, stream, rng);
+        return 0; // no averaging samples
+      }
+    }
 
     if (rf_params.bootstrap) {
       // Use bootstrapped sample set
@@ -91,6 +394,7 @@ class RandomForest {
     size_t num_avg_samples = 0;
     
     if (rf_params.oob_honesty and rf_params.bootstrap) {
+      selected_rows->resize(n_sampled_rows, stream);
       // honesty doesn't make sense without bootstrapping -- all the obs were otherwise selected
       num_avg_samples = n_sampled_rows;
       assert(rf_params.bootstrap);
@@ -100,35 +404,27 @@ class RandomForest {
       thrust::sort(thrust::cuda::par.on(stream), selected_rows->begin(), selected_rows->end());
 
       // Get the set of observations that are not used for split
-      tmp_row_vec->resize(n_rows, stream);
       auto iter_end = thrust::set_difference(
           thrust::cuda::par.on(stream),
           thrust::make_counting_iterator<int>(0),
           thrust::make_counting_iterator<int>(n_sampled_rows),
           selected_rows->begin(),
           selected_rows->end(),
-          tmp_row_vec->begin());
+          remaining_samples->begin());
       
-      // Now tmp_row_vec is the observations available for the averaging set
-      size_t num_remaining_samples = iter_end - tmp_row_vec->begin();
-      tmp_row_vec->resize(num_remaining_samples, stream);
+      // Now remaining_samples is the observations available for the averaging set
+      size_t num_remaining_samples = iter_end - remaining_samples->begin();
+      remaining_samples->resize(num_remaining_samples, stream);
 
       // Get the avg selected rows either as the remaining data, or bootstrapped again
+      selected_rows->resize(n_sampled_rows * 2, stream);
       if (rf_params.double_bootstrap) {
-        rng.uniformInt<int>(selected_rows->data() + n_sampled_rows, num_avg_samples, 0, num_remaining_samples, stream);
-        auto index_iter = thrust::make_permutation_iterator(tmp_row_vec->begin(), selected_rows->begin() + n_sampled_rows);
-      
-        thrust::copy(thrust::cuda::par.on(stream), index_iter, index_iter + num_avg_samples, selected_rows->begin() + n_sampled_rows);
+        sample_rows_from_remaining_rows(remaining_samples, selected_rows, workspace, n_sampled_rows, n_sampled_rows, stream, rng);
       } else {
-        thrust::copy(thrust::cuda::par.on(stream), tmp_row_vec->begin(), tmp_row_vec->end(), selected_rows->begin() + n_sampled_rows);
+        thrust::copy(thrust::cuda::par.on(stream), remaining_samples->begin(), remaining_samples->end(), selected_rows->begin() + n_sampled_rows);
       }
       
-      // First n_rows goes to training, num_avg_samples goes to averaging.
-      auto begin_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
-          thrust::make_counting_iterator<int>(0), split_row_mask->begin()));
-      auto end_zip_iterator = thrust::make_zip_iterator(thrust::make_tuple(
-          thrust::make_counting_iterator<int>(2 * n_sampled_rows), split_row_mask->end()));
-      thrust::for_each(thrust::cuda::par.on(stream), begin_zip_iterator, end_zip_iterator, thrust::make_zip_function(set_mask_functor(n_sampled_rows)));
+      update_averaging_mask(split_row_mask, n_sampled_rows, stream);
     }
 
     return num_avg_samples;
@@ -206,13 +502,76 @@ class RandomForest {
            n_streams,
            handle.get_stream_pool_size());
 
+    int n_trees = this->rf_params.n_trees;
+    // Compute the number of trees. This might change based on the "groups" logic
+    std::vector<std::vector<int>> foldMemberships;
+    const int foldGroupSize = this->rf_params.foldGroupSize;
+    const int minTreesPerGroupFold = this->rf_params.minTreesPerGroupFold;
+    std::unique_ptr<rmm::device_uvector<int>> groups;
+    int n_groups = 0;
+
+    if (this->rf_params.group_col_idx >= 0) {
+      // Here we'll going to do a unique, then build a vector of indices into the unique vector
+      cudaStream_t stream = handle.get_stream_from_stream_pool(0);
+      rmm::device_uvector<T> input_groups(n_rows, stream);
+      rmm::device_uvector<T> input_groups_unique(n_rows, stream);
+      groups = std::make_unique<rmm::device_uvector<int>>(n_rows, stream);
+      cudaMemcpyAsync(input_groups.data(), 
+          input + n_rows * this->rf_params.group_col_idx, 
+          n_rows * sizeof(T), cudaMemcpyDefault, stream);
+      cudaMemcpyAsync(input_groups_unique.data(), 
+          input + n_rows * this->rf_params.group_col_idx, 
+          n_rows * sizeof(T), cudaMemcpyDefault, stream);
+      // Sadly we have to sort the entire array for unique to work. Is there 
+      // a way to just unique the unsorted array?
+      thrust::sort(thrust::cuda::par.on(stream),
+          input_groups_unique.data(),
+          input_groups_unique.data() + n_rows);
+      T* new_end = thrust::unique(thrust::cuda::par.on(stream),
+          input_groups_unique.data(),
+          input_groups_unique.data() + n_rows);
+      // Now we'll have n_groups and can use some iterator to find the values for each group
+      n_groups = new_end - input_groups_unique.data(); 
+
+      UniqueTransformFunctor transform_fn{input_groups_unique.data(), n_groups};
+      thrust::transform(
+          thrust::cuda::par.on(stream),
+          input_groups.data(),
+          input_groups.data() + n_rows,
+          groups->data(),
+          transform_fn);
+    }
+
+    if (minTreesPerGroupFold > 0 and n_groups > 0) {
+      // Use a separate RNG and the std functions for group membership. 
+      std::random_device rd;
+      std::mt19937 group_fold_rng(rd());
+      auto random_seed = DT::fnv1a32_basis;
+      random_seed      = DT::fnv1a32(random_seed, this->rf_params.seed);
+      random_seed      = DT::fnv1a32(random_seed, std::numeric_limits<int>::max());
+      group_fold_rng.seed(random_seed);
+
+      int n_folds = (n_groups + foldGroupSize - 1) / foldGroupSize;
+      n_trees = n_folds * minTreesPerGroupFold;
+      forest->trees.resize(n_trees);
+      // TODO: Why are there 2 separate rf_params structs? 
+      // I think it would be best for this class to hold a pointer to the one that's passed in to fit.
+      forest->rf_params.n_trees = n_trees;
+      this->rf_params.n_trees = n_trees;
+      
+      foldMemberships = std::vector<std::vector<int>>(n_folds, std::vector<int>(minTreesPerGroupFold));
+
+      //assign group to fold
+      assign_groups_to_folds(n_groups, n_folds, foldGroupSize, foldMemberships, group_fold_rng);
+    }
+
     // computing the quantiles: last two return values are shared pointers to device memory
     // encapsulated by quantiles struct
     auto [quantiles, quantiles_array, n_bins_array] =
       DT::computeQuantiles(handle, input, this->rf_params.tree_params.max_n_bins, n_rows, n_cols);
 
     // n_streams should not be less than n_trees
-    if (this->rf_params.n_trees < n_streams) n_streams = this->rf_params.n_trees;
+    if (n_trees < n_streams) n_streams = n_trees;
 
     // Select n_sampled_rows (with replacement) numbers from [0, n_rows) per tree.
     // selected_rows: randomly generated IDs for bootstrapped samples (w/ replacement); a device
@@ -221,29 +580,45 @@ class RandomForest {
     // constructor
     std::deque<rmm::device_uvector<int>> selected_rows;
     std::deque<rmm::device_uvector<bool>> split_row_masks;
-    std::deque<rmm::device_uvector<int>> sampling_staging_vecs;
+    std::deque<rmm::device_uvector<int>> workspaces;
+    std::deque<rmm::device_uvector<int>> remaining_groups_vec;
+    std::deque<rmm::device_uvector<int>> remaining_samples_vec;
 
+    const bool use_extra_vecs = this->rf_params.oob_honesty or this->rf_params.minTreesPerGroupFold > 0;
     size_t max_sample_row_size = this->rf_params.oob_honesty ? n_sampled_rows * 2 : n_sampled_rows;
     for (int i = 0; i < n_streams; i++) {
       auto s = handle.get_stream_from_stream_pool(i);
       selected_rows.emplace_back(max_sample_row_size, s);
-      if (this->rf_params.oob_honesty) {
+      if (use_extra_vecs) {
         split_row_masks.emplace_back(max_sample_row_size, s);
-        sampling_staging_vecs.emplace_back(n_rows, s);
+        workspaces.emplace_back(n_rows, s);
+        remaining_samples_vec.emplace_back(n_rows, s);
+      }
+      if (n_groups > 0) {
+        remaining_groups_vec.emplace_back(n_groups, s);
       }
     }
 
 #pragma omp parallel for num_threads(n_streams)
-    for (int i = 0; i < this->rf_params.n_trees; i++) {
+    for (int i = 0; i < n_trees; i++) {
       int stream_id = omp_get_thread_num();
       auto s        = handle.get_stream_from_stream_pool(stream_id);
       
-      rmm::device_uvector<int>* sampling_staging_vec = this->rf_params.oob_honesty ? &sampling_staging_vecs[stream_id] : nullptr;
-      rmm::device_uvector<bool>* split_row_mask = this->rf_params.oob_honesty ? &split_row_masks[stream_id] : nullptr;
+      rmm::device_uvector<int>* remaining_samples = use_extra_vecs ? &remaining_samples_vec[stream_id] : nullptr;
+      rmm::device_uvector<int>* workspace = use_extra_vecs ? &workspaces[stream_id] : nullptr;
+      rmm::device_uvector<int>* remaining_groups = n_groups > 0 ? &remaining_groups_vec[stream_id] : nullptr;
+      rmm::device_uvector<bool>* split_row_mask = use_extra_vecs ? &split_row_masks[stream_id] : nullptr;
+      int* this_groups = n_groups > 0 ? groups->data() : nullptr;
       auto n_avg_samples = this->get_row_sample(
-          i, n_rows, n_sampled_rows, &selected_rows[stream_id],
+          i, n_rows, n_sampled_rows, 
+          &selected_rows[stream_id],
           split_row_mask,
-          sampling_staging_vec,
+          remaining_groups,
+          remaining_samples,
+          workspace,
+          this_groups,
+          n_groups,
+          foldMemberships,
           s);
 
       /* Build individual tree in the forest.
@@ -286,6 +661,7 @@ class RandomForest {
                                                         i);
       }
     }
+
     // Cleanup
     handle.sync_stream_pool();
     handle.sync_stream();
