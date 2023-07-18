@@ -277,6 +277,7 @@ class RandomForest {
                         rmm::device_uvector<int>* workspace, // 1x n sampled rows
                         int* groups,
                         const int n_groups,
+                        const int group_tree_count,
                         const std::vector<std::vector<int>>& fold_memberships, // each group belongs to one fold
                         const cudaStream_t stream)
   {
@@ -322,7 +323,7 @@ class RandomForest {
       if (rf_params.oob_honesty) {
         const float split_ratio = 0.632; 
 
-        if (rf_params.minTreesPerGroupFold > 0) {
+        if (rf_params.minTreesPerGroupFold > 0 and tree_id < group_tree_count) {
           // Doing group / fold "leave-out" logic
           int honest_split_size = split_ratio * (n_groups - current_fold_groups->size());
 
@@ -376,7 +377,7 @@ class RandomForest {
 
         return n_sampled_rows; // averaging sample count
 
-      } else if (rf_params.minTreesPerGroupFold > 0) {
+      } else if (rf_params.minTreesPerGroupFold > 0 and tree_id < group_tree_count) {
         // Just don't use samples from the current fold for splitting. No averaging.
         leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
             groups, restricted_group_ixs_diff, n_sampled_rows, 0, stream, rng);
@@ -542,6 +543,7 @@ class RandomForest {
           transform_fn);
     }
 
+    int group_tree_count = 0    
     if (minTreesPerGroupFold > 0 and n_groups > 0) {
       // Use a separate RNG and the std functions for group membership. 
       std::random_device rd;
@@ -552,7 +554,9 @@ class RandomForest {
       group_fold_rng.seed(random_seed);
 
       int n_folds = (n_groups + foldGroupSize - 1) / foldGroupSize;
-      n_trees = n_folds * minTreesPerGroupFold;
+      group_tree_count = n_folds * minTreesPerGroupFold;
+      n_trees = std::max(n_trees, group_tree_count);
+
       forest->trees.resize(n_trees);
       // TODO: Why are there 2 separate rf_params structs? 
       // I think it would be best for this class to hold a pointer to the one that's passed in to fit.
@@ -618,6 +622,7 @@ class RandomForest {
           workspace,
           this_groups,
           n_groups,
+          group_tree_count,
           foldMemberships,
           s);
 
