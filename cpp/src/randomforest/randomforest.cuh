@@ -305,7 +305,7 @@ class RandomForest {
       std::vector<int> restricted_group_ixs;
       std::vector<int> restricted_group_ixs_diff;
       int restricted_ix_size = n_groups;
-      if (rf_params.minTreesPerGroupFold > 0) {
+      if (rf_params.minTreesPerGroupFold > 0 and tree_id < group_tree_count) {
         const int current_fold = tree_id / rf_params.minTreesPerGroupFold;
         current_fold_groups = &fold_memberships[current_fold];
         restricted_group_ixs.resize(n_groups);
@@ -543,7 +543,7 @@ class RandomForest {
           transform_fn);
     }
 
-    int group_tree_count = 0    
+    int group_tree_count = 0;
     if (minTreesPerGroupFold > 0 and n_groups > 0) {
       // Use a separate RNG and the std functions for group membership. 
       std::random_device rd;

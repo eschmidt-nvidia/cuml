@@ -701,6 +701,97 @@ TEST(RfTests, SmallHonestFolds)
   fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
 }
 
+
+TEST(RfTests, SmallHonestFoldsWithFallback)
+{
+  std::size_t m = 1000;
+  std::size_t n = 10;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(42);
+  r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
+TEST(RfTests, SmallDishonestFoldsWithFallback)
+{
+  std::size_t m = 1000;
+  std::size_t n = 10;
+  thrust::device_vector<float> X(m * n);
+  thrust::device_vector<float> y(m);
+  raft::random::Rng r(42);
+  r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
+      X.data() + m, X.data(), TransformFunctor{});
+  // quantize the first column so that we can use it for meaningful groups
+  r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+  auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
+  auto forest_ptr  = forest.get();
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
+  raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  RF_params rf_params =
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+  // Check we have actually learned something
+  EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // See if fil overflows
+  thrust::device_vector<float> pred(m);
+  ModelHandle model;
+  build_treelite_forest(&model, forest_ptr, n);
+
+  std::size_t num_outputs = 1;
+  fil::treelite_params_t tl_params{fil::algo_t::ALGO_AUTO,
+                                   num_outputs > 1,
+                                   1.f / num_outputs,
+                                   fil::storage_type_t::AUTO,
+                                   8,
+                                   1,
+                                   0,
+                                   nullptr};
+  
+  fil::forest_variant forest_variant;
+  fil::from_treelite(handle, &forest_variant, model, &tl_params);
+  fil::forest_t<float> fil_forest = std::get<fil::forest_t<float>>(forest_variant);
+  fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
+}
+
 TEST(RfTests, HonestFolds)
 {
   std::size_t m = 10000;

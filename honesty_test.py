@@ -18,7 +18,6 @@ input = pd.read_parquet("/home/scratch.eschmidt_sw/gotvBIG.parquet")
 input["vh_stratum"] = input["vh_stratum"].replace({"below": -1.0, "average":0.0, "above":1.0, "":np.nan}).astype(float)
 
 states = input['state'].unique()
-print(f"num unique states {len(states)}")
 states_map = {}
 for ix_state,state in enumerate(states):
   states_map[state] = float(ix_state)
