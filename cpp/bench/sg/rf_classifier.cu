@@ -108,7 +108,10 @@ std::vector<Params> getInputs()
                        1234ULL,             /* seed */
                        ML::CRITERION::GINI, /* split_criterion */
                        8,                   /* n_streams */
-                       128                  /* max_batch_size */
+                       128,                 /* max_batch_size */
+                       0,                   /* minTreesPerGroupFold */
+                       0,                   /* foldGroupSize */
+                       -1                   /* group_col_idx */
   );
 
   std::vector<Triplets> rowcols = {

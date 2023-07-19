@@ -47,6 +47,19 @@ y_test = y.iloc[ix_test]
 
 n_trees = 100
 
+# Start group call -- note we're not using groups to specify OOB predictions
+# Note, here we specify a column index to use for groups. Then the fit() function
+# will use the GPU to compute unique group ids for every sample. 
+group_col_idx = x.columns.get_loc("state")
+random_forest_regress = RFR(n_estimators=n_trees, oob_honesty=True, split_criterion=2, 
+    random_state=42, minTreesPerGroupFold=5, foldGroupSize=1, group_col_idx=group_col_idx)
+start = time.time()
+trainedRFR = random_forest_regress.fit(x_train, y_train)
+end = time.time()
+pred_test_regress = trainedRFR.predict(x_test)
+mse = cuml.metrics.mean_squared_error(y_test, pred_test_regress)
+print(f"Group Honesty {mse} time {end-start}")
+
 random_forest_regress = RFR(n_estimators=n_trees, split_criterion=2, random_state=42)  
 start = time.time()
 trainedRFR = random_forest_regress.fit(x_train, y_train)
@@ -62,3 +75,4 @@ end = time.time()
 pred_test_regress = trainedRFR.predict(x_test)
 mse = cuml.metrics.mean_squared_error(y_test, pred_test_regress)
 print(f"Honesty {mse} time {end-start}")
+
