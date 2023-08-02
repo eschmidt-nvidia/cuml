@@ -449,6 +449,7 @@ void fit(const raft::handle_t& user_handle,
          int* labels,
          int n_unique_labels,
          RF_params rf_params,
+         int* groups,
          int verbosity)
 {
   raft::common::nvtx::range fun_scope("RF::fit @randomforest.cu");
@@ -459,7 +460,18 @@ void fit(const raft::handle_t& user_handle,
 
   std::shared_ptr<RandomForest<float, int>> rf_classifier =
     std::make_shared<RandomForest<float, int>>(rf_params, RF_type::CLASSIFICATION);
-  rf_classifier->fit(user_handle, input, n_rows, n_cols, labels, n_unique_labels, forest);
+  rf_classifier->fit(user_handle, input, groups, n_rows, n_cols, labels, n_unique_labels, forest);
+}
+
+template<class T, class L>
+int get_tree_row_meta_info(
+  int ix_tree,
+  int ix_sample,
+  const RandomForestMetaData<T,L>* forest)
+{
+  if (ix_tree >= forest->trees.size()) return SplitAvgUnusedEnum::invalid;
+  if (ix_sample >= forest->trees[ix_tree]->split_avg_enums.size()) return SplitAvgUnusedEnum::invalid;
+  return forest->trees[ix_tree]->split_avg_enums[ix_sample];
 }
 
 void fit(const raft::handle_t& user_handle,
@@ -470,6 +482,7 @@ void fit(const raft::handle_t& user_handle,
          int* labels,
          int n_unique_labels,
          RF_params rf_params,
+         int* groups,
          int verbosity)
 {
   raft::common::nvtx::range fun_scope("RF::fit @randomforest.cu");
@@ -480,7 +493,7 @@ void fit(const raft::handle_t& user_handle,
 
   std::shared_ptr<RandomForest<double, int>> rf_classifier =
     std::make_shared<RandomForest<double, int>>(rf_params, RF_type::CLASSIFICATION);
-  rf_classifier->fit(user_handle, input, n_rows, n_cols, labels, n_unique_labels, forest);
+  rf_classifier->fit(user_handle, input, groups, n_rows, n_cols, labels, n_unique_labels, forest);
 }
 /** @} */
 
@@ -596,8 +609,7 @@ RF_params set_rf_params(int max_depth,
                         int cfg_n_streams,
                         int max_batch_size,
                         int minTreesPerGroupFold,
-                        int foldGroupSize,
-                        int group_col_idx)
+                        int foldGroupSize)
 {
   DT::DecisionTreeParams tree_params;
   DT::set_tree_params(tree_params,
@@ -625,7 +637,6 @@ RF_params set_rf_params(int max_depth,
   rf_params.tree_params = tree_params;
   rf_params.minTreesPerGroupFold = minTreesPerGroupFold;
   rf_params.foldGroupSize = foldGroupSize;
-  rf_params.group_col_idx = group_col_idx;
   validity_check(rf_params);
   return rf_params;
 }
@@ -654,6 +665,7 @@ void fit(const raft::handle_t& user_handle,
          int n_cols,
          float* labels,
          RF_params rf_params,
+         int* groups,
          int verbosity)
 {
   raft::common::nvtx::range fun_scope("RF::fit @randomforest.cu");
@@ -664,7 +676,7 @@ void fit(const raft::handle_t& user_handle,
 
   std::shared_ptr<RandomForest<float, float>> rf_regressor =
     std::make_shared<RandomForest<float, float>>(rf_params, RF_type::REGRESSION);
-  rf_regressor->fit(user_handle, input, n_rows, n_cols, labels, 1, forest);
+  rf_regressor->fit(user_handle, input, groups, n_rows, n_cols, labels, 1, forest);
 }
 
 void fit(const raft::handle_t& user_handle,
@@ -674,6 +686,7 @@ void fit(const raft::handle_t& user_handle,
          int n_cols,
          double* labels,
          RF_params rf_params,
+         int* groups,
          int verbosity)
 {
   raft::common::nvtx::range fun_scope("RF::fit @randomforest.cu");
@@ -684,7 +697,7 @@ void fit(const raft::handle_t& user_handle,
 
   std::shared_ptr<RandomForest<double, double>> rf_regressor =
     std::make_shared<RandomForest<double, double>>(rf_params, RF_type::REGRESSION);
-  rf_regressor->fit(user_handle, input, n_rows, n_cols, labels, 1, forest);
+  rf_regressor->fit(user_handle, input, groups, n_rows, n_cols, labels, 1, forest);
 }
 /** @} */
 
@@ -775,6 +788,11 @@ template std::string get_rf_summary_text<float, int>(const RandomForestClassifie
 template std::string get_rf_summary_text<double, int>(const RandomForestClassifierD* forest);
 template std::string get_rf_summary_text<float, float>(const RandomForestRegressorF* forest);
 template std::string get_rf_summary_text<double, double>(const RandomForestRegressorD* forest);
+
+template int get_tree_row_meta_info<float, int>(int, int, const RandomForestClassifierF* forest);
+template int get_tree_row_meta_info<double, int>(int, int, const RandomForestClassifierD* forest);
+template int get_tree_row_meta_info<float, float>(int, int, const RandomForestRegressorF* forest);
+template int get_tree_row_meta_info<double, double>(int, int, const RandomForestRegressorD* forest);
 
 template std::string get_rf_detailed_text<float, int>(const RandomForestClassifierF* forest);
 template std::string get_rf_detailed_text<double, int>(const RandomForestClassifierD* forest);

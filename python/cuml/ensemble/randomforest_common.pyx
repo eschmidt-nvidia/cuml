@@ -20,6 +20,7 @@ import math
 import warnings
 import typing
 from inspect import signature
+from enum import Enum
 
 from cuml.internals.safe_imports import cpu_only_import
 np = cpu_only_import('numpy')
@@ -40,6 +41,13 @@ from cuml.common import input_to_cuml_array
 from cuml.common.array_descriptor import CumlArrayDescriptor
 from cuml.prims.label.classlabels import make_monotonic, check_labels
 
+class SplitAvgUnusedEnum(Enum):
+    unused = 0
+    split = 1
+    avg = 2
+    group_split_unselected = 3
+    group_avg_unselected = 4
+    invalid = 5
 
 class BaseRandomForestModel(Base):
     _param_names = ['n_estimators', 'max_depth', 'handle',
@@ -58,8 +66,7 @@ class BaseRandomForestModel(Base):
                     'output_type', 'min_weight_fraction_leaf', 'n_jobs',
                     'max_leaf_nodes', 'min_impurity_split', 'oob_score',
                     'random_state', 'warm_start', 'class_weight',
-                    'criterion', 'minTreesPerGroupFold', 'foldGroupSize',
-                    'group_col_idx']
+                    'criterion', 'minTreesPerGroupFold', 'foldGroupSize']
 
     criterion_dict = {'0': GINI, 'gini': GINI,
                       '1': ENTROPY, 'entropy': ENTROPY,
@@ -87,7 +94,6 @@ class BaseRandomForestModel(Base):
                  max_batch_size=4096,
                  minTreesPerGroupFold=0,
                  foldGroupSize=1,
-                 group_col_idx=-1,
                  **kwargs):
 
         sklearn_params = {"criterion": criterion,
@@ -159,6 +165,7 @@ class BaseRandomForestModel(Base):
         self.double_bootstrap = double_bootstrap
         self.n_bins = n_bins
         self.n_cols = None
+        self.tree_group_metas = None
         self.dtype = dtype
         self.accuracy_metric = accuracy_metric
         self.max_batch_size = max_batch_size
@@ -171,7 +178,6 @@ class BaseRandomForestModel(Base):
         self.treelite_serialized_model = None
         self.minTreesPerGroupFold = minTreesPerGroupFold
         self.foldGroupSize = foldGroupSize
-        self.group_col_idx = group_col_idx
 
     def _get_max_feat_val(self) -> float:
         if type(self.max_features) == int:
@@ -277,6 +283,7 @@ class BaseRandomForestModel(Base):
                                             get_output_type=False)
     def _dataset_setup_for_fit(
             self, X, y,
+            groups,
             convert_dtype) -> typing.Tuple[CumlArray, CumlArray, float]:
         # Reset the old tree data for new fit call
         self._reset_forest_data()
@@ -314,6 +321,14 @@ class BaseRandomForestModel(Base):
                     convert_to_dtype=(self.dtype if convert_dtype
                                       else None),
                     check_rows=self.n_rows, check_cols=1)
+        
+        group_m = None
+        if groups is not None:
+            group_m, _, _, group_dtype = \
+                input_to_cuml_array(
+                    groups,
+                    convert_to_dtype=None,
+                    check_rows=self.n_rows, check_cols=1)
 
         if self.dtype == np.float64:
             warnings.warn("To use pickling first train using float32 data "
@@ -332,7 +347,7 @@ class BaseRandomForestModel(Base):
         if type(self.min_samples_split_averaging) == float:
             self.min_samples_split_averaging = \
                 max(2, math.ceil(self.min_samples_split_averaging * self.n_rows))
-        return X_m, y_m, max_feature_val
+        return X_m, y_m, group_m,max_feature_val
 
     def _tl_handle_from_bytes(self, treelite_serialized_model):
         if not treelite_serialized_model:

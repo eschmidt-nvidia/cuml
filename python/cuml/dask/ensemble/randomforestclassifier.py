@@ -197,10 +197,6 @@ class RandomForestClassifier(
         as it will contain the remaining groups). Then minTreesPerGroupFold are grown with each
         entire fold of groups left out.
 
-    group_col_idx : int (default = -1)
-        The numeric index of the column to be used for group processing
-
-
     Examples
     --------
     For usage examples, please see the RAPIDS notebooks repository:
@@ -308,6 +304,7 @@ class RandomForestClassifier(
             is trained on its partition
 
         """
+        print("class outer fit")
         self.unique_classes = cp.asarray(
             y.unique().compute().sort_values(ignore_index=True)
         )

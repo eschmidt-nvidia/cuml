@@ -39,7 +39,7 @@ from cuml.common.doc_utils import insert_into_docstring
 from pylibraft.common.handle import Handle
 from cuml.common import input_to_cuml_array
 
-from cuml.ensemble.randomforest_common import BaseRandomForestModel
+from cuml.ensemble.randomforest_common import BaseRandomForestModel, SplitAvgUnusedEnum
 from cuml.ensemble.randomforest_common import _obtain_fil_model
 from cuml.ensemble.randomforest_shared cimport *
 
@@ -72,6 +72,7 @@ cdef extern from "cuml/ensemble/randomforest.hpp" namespace "ML":
                   int*,
                   int,
                   RF_params,
+                  int*,
                   int) except +
 
     cdef void fit(handle_t& handle,
@@ -82,6 +83,7 @@ cdef extern from "cuml/ensemble/randomforest.hpp" namespace "ML":
                   int*,
                   int,
                   RF_params,
+                  int*,
                   int) except +
 
     cdef void predict(handle_t& handle,
@@ -283,9 +285,6 @@ class RandomForestClassifier(BaseRandomForestModel,
         as it will contain the remaining groups). Then minTreesPerGroupFold are grown with each
         entire fold of groups left out.
 
-    group_col_idx : int (default = -1)
-        The numeric index of the column to be used for group processing
-        
     Notes
     -----
     **Known Limitations**\n
@@ -475,7 +474,7 @@ class RandomForestClassifier(BaseRandomForestModel,
     @cuml.internals.api_base_return_any(set_output_type=False,
                                         set_output_dtype=True,
                                         set_n_features_in=False)
-    def fit(self, X, y, convert_dtype=True):
+    def fit(self, X, y, groups=None, group_meta=None, convert_dtype=True):
         """
         Perform Random Forest Classification on the input data
 
@@ -486,15 +485,17 @@ class RandomForestClassifier(BaseRandomForestModel,
             y to be of dtype int32. This will increase memory used for
             the method.
         """
-
-        X_m, y_m, max_feature_val = self._dataset_setup_for_fit(X, y,
+        X_m, y_m, groups_m, max_feature_val = self._dataset_setup_for_fit(X, y, groups,
                                                                 convert_dtype)
         # Track the labels to see if update is necessary
         self.update_labels = not check_labels(y_m, self.classes_)
-        cdef uintptr_t X_ptr, y_ptr
+        cdef uintptr_t X_ptr, y_ptr, groups_ptr
 
         X_ptr = X_m.ptr
         y_ptr = y_m.ptr
+
+        if groups is not None:
+            groups_ptr = groups_m.ptr
 
         cdef handle_t* handle_ =\
             <handle_t*><uintptr_t>self.handle.getHandle()
@@ -530,8 +531,7 @@ class RandomForestClassifier(BaseRandomForestModel,
                                   <int> self.n_streams,
                                   <int> self.max_batch_size,
                                   <int> self.minTreesPerGroupFold,
-                                  <int> self.foldGroupSize,
-                                  <int> self.group_col_idx)
+                                  <int> self.foldGroupSize)
 
         if self.dtype == np.float32:
             fit(handle_[0],
@@ -542,6 +542,7 @@ class RandomForestClassifier(BaseRandomForestModel,
                 <int*> y_ptr,
                 <int> self.num_classes,
                 rf_params,
+                <int*> groups_ptr,
                 <int> self.verbose)
 
         elif self.dtype == np.float64:
@@ -554,18 +555,32 @@ class RandomForestClassifier(BaseRandomForestModel,
                 <int*> y_ptr,
                 <int> self.num_classes,
                 rf_params64,
+                <int*> groups_ptr,
                 <int> self.verbose)
 
         else:
             raise TypeError("supports only np.float32 and np.float64 input,"
                             " but input of type '%s' passed."
                             % (str(self.dtype)))
+        
         # make sure that the `fit` is complete before the following delete
         # call happens
         self.handle.sync()
         del X_m
         del y_m
+        del groups_m
         return self
+
+    def get_tree_sample_honesty_group_meta(self, tree_id, row_id):
+        cdef RandomForestMetaData[float, int] *rf_forest = \
+            <RandomForestMetaData[float, int]*><uintptr_t> self.rf_forest
+        cdef RandomForestMetaData[double, int] *rf_forest64 = \
+            <RandomForestMetaData[double, int]*><uintptr_t> self.rf_forest64
+        
+        if self.dtype == np.float32:
+            return SplitAvgUnusedEnum(get_tree_row_meta_info(tree_id, row_id, rf_forest))
+        else: 
+            return SplitAvgUnusedEnum(get_tree_row_meta_info(tree_id, row_id, rf_forest64))
 
     @cuml.internals.api_base_return_array(get_output_dtype=True)
     def _predict_model_on_cpu(self, X, convert_dtype) -> CumlArray:

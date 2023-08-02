@@ -136,12 +136,6 @@ struct RF_params {
    * entire fold of groups left out.
    */
   int foldGroupSize;
-
-  /**
-   * group_col_idx
-   * The numeric index of the column to be used for group processing
-   */
-  int group_col_idx;
   
   /**
    * Decision tree training hyper parameter struct.
@@ -196,6 +190,12 @@ void build_treelite_forest(ModelHandle* model,
                            const RandomForestMetaData<T, L>* forest,
                            int num_features);
 
+template <class T, class L>
+int get_tree_row_meta_info(
+    int ix_tree,
+    int ix_sample,
+    const RandomForestMetaData<T,L>* forest);
+
 ModelHandle concatenate_trees(std::vector<ModelHandle> treelite_handles);
 
 void compare_concat_forest_to_subforests(ModelHandle concat_tree_handle,
@@ -213,6 +213,7 @@ void fit(const raft::handle_t& user_handle,
          int* labels,
          int n_unique_labels,
          RF_params rf_params,
+         int* groups = nullptr,
          int verbosity = CUML_LEVEL_INFO);
 void fit(const raft::handle_t& user_handle,
          RandomForestClassifierD*& forest,
@@ -222,6 +223,7 @@ void fit(const raft::handle_t& user_handle,
          int* labels,
          int n_unique_labels,
          RF_params rf_params,
+         int* groups = nullptr,
          int verbosity = CUML_LEVEL_INFO);
 
 void predict(const raft::handle_t& user_handle,
@@ -271,8 +273,7 @@ RF_params set_rf_params(int max_depth,
                         int cfg_n_streams,
                         int max_batch_size,
                         int minTreesPerGroupFold,
-                        int foldGroupSize,
-                        int group_col_idx);
+                        int foldGroupSize);
 
 // ----------------------------- Regression ----------------------------------- //
 
@@ -286,7 +287,9 @@ void fit(const raft::handle_t& user_handle,
          int n_cols,
          float* labels,
          RF_params rf_params,
+         int* groups = nullptr,
          int verbosity = CUML_LEVEL_INFO);
+
 void fit(const raft::handle_t& user_handle,
          RandomForestRegressorD*& forest,
          double* input,
@@ -294,6 +297,7 @@ void fit(const raft::handle_t& user_handle,
          int n_cols,
          double* labels,
          RF_params rf_params,
+         int* groups = nullptr,
          int verbosity = CUML_LEVEL_INFO);
 
 void predict(const raft::handle_t& user_handle,
