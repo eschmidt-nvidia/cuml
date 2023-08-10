@@ -19,6 +19,7 @@
 #include <decisiontree/batched-levelalgo/quantiles.cuh>
 #include <decisiontree/decisiontree.cuh>
 #include <decisiontree/treelite_util.h>
+#include <cuml/tree/decisiontree.hpp>
 
 #include <raft/random/permute.cuh>
 
@@ -61,43 +62,34 @@ struct set_mask_functor {
 
 namespace {
 
-__global__ void log10(int* array) {
-  for (int ix = 0; ix < 10; ++ix) {
+using ML::DT::SplitAvgUnusedEnum;
+
+__global__ void log(int* array, int n_samples) {
+  for (int ix = 0; ix < n_samples; ++ix) {
     printf("array %d = %d\n", ix, array[ix]);
   }
 }
 
-__global__ void log10groups(const int* row_ids, const int* group_ids) {
-  for (int ix = 0; ix < 10; ++ix) {
+__global__ void loggroups(const int* row_ids, const int* group_ids, const int n_samples) {
+  for (int ix = 0; ix < n_samples; ++ix) {
     printf("group ix %d, row %d = %d\n", ix, row_ids[ix], group_ids[row_ids[ix]]);
   }
 }
 
-void assign_groups_to_folds(
-  int n_groups,
-  int n_folds,
-  int fold_size,
-  std::vector<std::vector<int>> & fold_memberships,
-  std::mt19937& rng) 
+__global__ void assign_standard_honesty_vec(
+    SplitAvgUnusedEnum* split_enums,
+    const int n_total_selected_rows,
+    const int* selected_rows,
+    const int n_splitting_rows)
 {
-    std::vector<int> group_indices(n_groups);
-    std::iota(group_indices.begin(), group_indices.end(), 0);
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n_total_selected_rows) return;
 
-    std::shuffle(group_indices.begin(), group_indices.end(), rng);
-          
-    for (int ix_fold = 0; ix_fold < n_folds - 1; ++ix_fold) {
-      std::copy(group_indices.begin() + ix_fold*fold_size,
-                group_indices.begin() + (ix_fold+1)*fold_size,
-                fold_memberships[ix_fold].begin());
-    }
-
-    // Last fold could be smaller
-    const int last_fold_start = (n_folds - 1) * fold_size;
-    const int last_fold_size = n_groups - last_fold_start;
-    fold_memberships[n_folds - 1].resize(last_fold_size);
-    for (int ix = 0; ix < last_fold_size; ++ix) {
-      fold_memberships[n_folds - 1][ix] = group_indices[last_fold_start + ix];
-    }
+  if (idx < n_splitting_rows) {
+    split_enums[selected_rows[idx]] = SplitAvgUnusedEnum::split;
+  } else {
+    split_enums[selected_rows[idx]] = SplitAvgUnusedEnum::avg;
+  }
 }
 
 template<typename T, typename U>
@@ -115,6 +107,65 @@ __device__ int lower_bound(const T search_val, const U* array, int count) {
     }
   }
   return first;
+}
+
+template<typename T, typename U>
+__device__ int lower_bound_search(const T search_val, const U* array, int count) {
+  int res = lower_bound(search_val, array, count);
+  return res < count and array[res] == search_val;
+}
+
+// In this second stage for groups, we assign any "unused" member of the particular group of groups to 
+// indicate that it was part of this group, but not selected
+__global__ void assign_group_based_standard_honesty_vec_stage1(
+    SplitAvgUnusedEnum* split_enums,
+    const int n_rows,
+    const int* sample_group_ids,
+    const int* considered_group_ids,
+    const int considered_group_id_count,
+    SplitAvgUnusedEnum enum_val)
+{
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n_rows) return;
+
+  const int group_id = sample_group_ids[idx];
+
+  if (lower_bound_search(group_id, considered_group_ids, considered_group_id_count)) {
+      split_enums[idx] = enum_val;
+  }
+}
+
+void assign_groups_to_folds(
+  int n_groups,
+  int n_folds,
+  int fold_size,
+  std::vector<std::vector<int>> & fold_memberships,
+  std::mt19937& rng) 
+{
+    std::vector<int> group_indices(n_groups);
+    std::iota(group_indices.begin(), group_indices.end(), 0);
+    std::shuffle(group_indices.begin(), group_indices.end(), rng);
+    
+    int ix_fold = 0;
+    for (; ix_fold < n_folds - 1; ++ix_fold) {
+      fold_memberships[ix_fold].resize(fold_size);
+      std::copy(group_indices.begin() + ix_fold*fold_size,
+                group_indices.begin() + (ix_fold+1)*fold_size,
+                fold_memberships[ix_fold].begin());
+
+      std::sort(fold_memberships[ix_fold].begin(), fold_memberships[ix_fold].end());
+    }
+
+    // Last fold could be smaller
+    const int last_fold_start = (ix_fold) * fold_size;
+    const int last_fold_size = n_groups - last_fold_start;
+    fold_memberships[ix_fold].resize(last_fold_size);
+
+    for (int ix = 0; ix < last_fold_size; ++ix) {
+      fold_memberships[ix_fold][ix] = group_indices[last_fold_start + ix];
+    }
+
+    std::sort(fold_memberships[ix_fold].begin(), fold_memberships[ix_fold].end());
 }
 
 template<typename T>
@@ -148,8 +199,7 @@ struct LeaveOutSamplesCopyIfFunctor {
   __device__ bool operator()(const int ix_sample) {
     // Do a quick lower_bound search
     const int group_id = sample_group_ids[ix_sample];
-    int it = lower_bound(group_id, remaining_groups, num_rem_groups);
-    return remaining_groups[it] == group_id;
+    return lower_bound_search(group_id, remaining_groups, num_rem_groups);
   }
 };
 
@@ -211,7 +261,6 @@ void leave_groups_out_sample(
   raft::update_device(remaining_groups->data(), remaining_groups_host.data(), 
       remaining_groups_host.size(), stream);
   remaining_groups->resize(remaining_groups_host.size(), stream);
-  
   generate_row_indices_from_remaining_groups(
     remaining_groups, remaining_samples, sample_group_ids, 
     num_samples, stream, rng);
@@ -278,10 +327,16 @@ class RandomForest {
                         const int n_groups,
                         const int group_tree_count,
                         const std::vector<std::vector<int>>& fold_memberships, // each group belongs to one fold
+                        rmm::device_uvector<SplitAvgUnusedEnum>* split_avg_enums,
                         const cudaStream_t stream)
   {
     // Todo: split group_fold_rng across threads
     raft::common::nvtx::range fun_scope("bootstrapping row IDs @randomforest.cuh");
+    if (split_avg_enums) {
+      // Initialize to unused
+      assert(SplitAvgUnusedEnum::unused == 0);
+      cudaMemsetAsync(split_avg_enums->data(), 0, sizeof(SplitAvgUnusedEnum) * n_rows, stream);
+    }
 
     // Hash these together so they are uncorrelated
     auto random_seed = DT::fnv1a32_basis;
@@ -298,6 +353,8 @@ class RandomForest {
     std::vector<std::vector<int>> honest_group_assignments(2);
     auto& splitting_groups = honest_group_assignments[0];
     auto& averaging_groups = honest_group_assignments[1];
+
+
     if (n_groups > 0) {
       // Special handling for groups. We don't support split ratio honesty
       const std::vector<int>* current_fold_groups;
@@ -328,7 +385,6 @@ class RandomForest {
 
           splitting_groups.resize(honest_split_size);
           averaging_groups.resize(restricted_ix_size - honest_split_size);
-
           assign_groups_to_folds(
               restricted_ix_size,
               2,
@@ -338,10 +394,12 @@ class RandomForest {
           
           // Replace indices with the actual groups
           for (int ix_group = 0; ix_group < honest_split_size; ix_group++) {
+            // printf("split group %d is %d\n", ix_group, restricted_group_ixs_diff[honest_group_assignments[0][ix_group]]);
             honest_group_assignments[0][ix_group] = restricted_group_ixs_diff[honest_group_assignments[0][ix_group]];
           }
           
           for (int ix_group = 0; ix_group < restricted_ix_size - honest_split_size; ix_group++) {
+            // printf("avg group %d is %d\n", ix_group, restricted_group_ixs_diff[honest_group_assignments[1][ix_group]]);
             honest_group_assignments[1][ix_group] = restricted_group_ixs_diff[honest_group_assignments[1][ix_group]];
           }
         } else {
@@ -366,11 +424,33 @@ class RandomForest {
               group_fold_rng);
         }
 
+        const int block_dim = 256;
         leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
             groups, splitting_groups, n_sampled_rows, 0, stream, rng);
+        const int stage1_grid_dim = (n_rows + block_dim - 1) / block_dim;
+        assign_group_based_standard_honesty_vec_stage1<<<stage1_grid_dim, block_dim, 0, stream>>>(
+            split_avg_enums->data(),
+            n_rows,
+            groups,
+            remaining_groups->data(),
+            remaining_groups->size(),
+            SplitAvgUnusedEnum::group_split_unselected);
 
+        cudaStreamSynchronize(stream);
         leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
             groups, averaging_groups, n_sampled_rows, n_sampled_rows, stream, rng);
+        assign_group_based_standard_honesty_vec_stage1<<<stage1_grid_dim, block_dim, 0, stream>>>(
+            split_avg_enums->data(),
+            n_rows,
+            groups,
+            remaining_groups->data(),
+            remaining_groups->size(),
+            SplitAvgUnusedEnum::group_avg_unselected);
+
+        const int total_sampled_rows = 2 * n_sampled_rows;
+        const int standard_grid_dim = (total_sampled_rows + block_dim - 1) / block_dim;
+        assign_standard_honesty_vec<<<standard_grid_dim, block_dim, 0, stream>>>(
+            split_avg_enums->data(), total_sampled_rows, selected_rows->data(), n_sampled_rows);
 
         update_averaging_mask(split_row_mask, n_sampled_rows, stream);
 
@@ -380,6 +460,7 @@ class RandomForest {
         // Just don't use samples from the current fold for splitting. No averaging.
         leave_groups_out_sample(remaining_groups, remaining_samples, selected_rows, workspace,
             groups, restricted_group_ixs_diff, n_sampled_rows, 0, stream, rng);
+        
         return 0; // no averaging samples
       }
     }
@@ -418,11 +499,20 @@ class RandomForest {
 
       // Get the avg selected rows either as the remaining data, or bootstrapped again
       selected_rows->resize(n_sampled_rows * 2, stream);
+      int total_sampled_rows = n_sampled_rows;
       if (rf_params.double_bootstrap) {
         sample_rows_from_remaining_rows(remaining_samples, selected_rows, workspace, n_sampled_rows, n_sampled_rows, stream, rng);
       } else {
+        num_avg_samples = remaining_samples->size();
         thrust::copy(thrust::cuda::par.on(stream), remaining_samples->begin(), remaining_samples->end(), selected_rows->begin() + n_sampled_rows);
       }
+
+      total_sampled_rows += num_avg_samples;
+
+      const int block_dim = 256;
+      const int grid_dim = (total_sampled_rows + block_dim - 1) / block_dim;
+      assign_standard_honesty_vec<<<grid_dim, block_dim, 0, stream>>>(
+          split_avg_enums->data(), total_sampled_rows, selected_rows->data(), n_sampled_rows);
       
       update_averaging_mask(split_row_mask, n_sampled_rows, stream);
     }
@@ -475,6 +565,7 @@ class RandomForest {
   */
   void fit(const raft::handle_t& user_handle,
            const T* input,
+           int* groups,
            int n_rows,
            int n_cols,
            L* labels,
@@ -507,38 +598,33 @@ class RandomForest {
     std::vector<std::vector<int>> foldMemberships;
     const int foldGroupSize = this->rf_params.foldGroupSize;
     const int minTreesPerGroupFold = this->rf_params.minTreesPerGroupFold;
-    std::unique_ptr<rmm::device_uvector<int>> groups;
     int n_groups = 0;
 
-    if (this->rf_params.group_col_idx >= 0) {
+    if (groups != nullptr) {
       // Here we'll do a unique on the group array, then build a vector of indices into the unique vector
       cudaStream_t stream = handle.get_stream_from_stream_pool(0);
-      rmm::device_uvector<T> input_groups(n_rows, stream);
-      rmm::device_uvector<T> input_groups_unique(n_rows, stream);
-      groups = std::make_unique<rmm::device_uvector<int>>(n_rows, stream);
-      cudaMemcpyAsync(input_groups.data(), 
-          input + n_rows * this->rf_params.group_col_idx, 
-          n_rows * sizeof(T), cudaMemcpyDefault, stream);
+      rmm::device_uvector<int> input_groups_unique(n_rows, stream);
       cudaMemcpyAsync(input_groups_unique.data(), 
-          input + n_rows * this->rf_params.group_col_idx, 
-          n_rows * sizeof(T), cudaMemcpyDefault, stream);
+          groups, 
+          n_rows * sizeof(int), cudaMemcpyDefault, stream);
       // Sadly we have to sort the entire array for unique to work. Is there 
       // a way to just unique the unsorted array?
       thrust::sort(thrust::cuda::par.on(stream),
           input_groups_unique.data(),
           input_groups_unique.data() + n_rows);
-      T* new_end = thrust::unique(thrust::cuda::par.on(stream),
+      int* new_end = thrust::unique(thrust::cuda::par.on(stream),
           input_groups_unique.data(),
           input_groups_unique.data() + n_rows);
+
       // Now we'll have n_groups and can use some iterator to find the values for each group
       n_groups = new_end - input_groups_unique.data(); 
 
       UniqueTransformFunctor transform_fn{input_groups_unique.data(), n_groups};
       thrust::transform(
           thrust::cuda::par.on(stream),
-          input_groups.data(),
-          input_groups.data() + n_rows,
-          groups->data(),
+          groups,
+          groups + n_rows,
+          groups,
           transform_fn);
     }
 
@@ -586,6 +672,7 @@ class RandomForest {
     std::deque<rmm::device_uvector<int>> workspaces;
     std::deque<rmm::device_uvector<int>> remaining_groups_vec;
     std::deque<rmm::device_uvector<int>> remaining_samples_vec;
+    std::deque<rmm::device_uvector<SplitAvgUnusedEnum>> split_avg_enum_vec;
 
     const bool use_extra_vecs = this->rf_params.oob_honesty or this->rf_params.minTreesPerGroupFold > 0;
     size_t max_sample_row_size = this->rf_params.oob_honesty ? n_sampled_rows * 2 : n_sampled_rows;
@@ -596,7 +683,9 @@ class RandomForest {
         split_row_masks.emplace_back(max_sample_row_size, s);
         workspaces.emplace_back(n_rows, s);
         remaining_samples_vec.emplace_back(n_rows, s);
+        split_avg_enum_vec.emplace_back(n_rows, s);
       }
+      
       if (n_groups > 0) {
         remaining_groups_vec.emplace_back(n_groups, s);
       }
@@ -611,7 +700,7 @@ class RandomForest {
       rmm::device_uvector<int>* workspace = use_extra_vecs ? &workspaces[stream_id] : nullptr;
       rmm::device_uvector<int>* remaining_groups = n_groups > 0 ? &remaining_groups_vec[stream_id] : nullptr;
       rmm::device_uvector<bool>* split_row_mask = use_extra_vecs ? &split_row_masks[stream_id] : nullptr;
-      int* this_groups = n_groups > 0 ? groups->data() : nullptr;
+      rmm::device_uvector<SplitAvgUnusedEnum>* split_avg_enums = use_extra_vecs ? &split_avg_enum_vec[stream_id] : nullptr;
       auto n_avg_samples = this->get_row_sample(
           i, n_rows, n_sampled_rows, 
           &selected_rows[stream_id],
@@ -619,10 +708,11 @@ class RandomForest {
           remaining_groups,
           remaining_samples,
           workspace,
-          this_groups,
+          groups,
           n_groups,
           group_tree_count,
           foldMemberships,
+          split_avg_enums,
           s);
 
       /* Build individual tree in the forest.
@@ -634,6 +724,8 @@ class RandomForest {
           (b) a pointer to a list of row numbers w.r.t original data.
       */
       if (this->rf_params.oob_honesty) {
+        std::vector<SplitAvgUnusedEnum> split_avg_enum_host(n_rows);
+        // Copy split_avg_enum_dev to host
         forest->trees[i] = DT::DecisionTree::fit<true>(handle,
                                                        s,
                                                        input,
@@ -648,6 +740,9 @@ class RandomForest {
                                                        this->rf_params.seed,
                                                        quantiles,
                                                        i);
+        forest->trees[i]->split_avg_enums = std::vector<SplitAvgUnusedEnum>(n_rows);
+        raft::update_host(forest->trees[i]->split_avg_enums.data(), 
+          split_avg_enums->data(), n_rows, s);
       } else {
         forest->trees[i] = DT::DecisionTree::fit<false>(handle,
                                                         s,

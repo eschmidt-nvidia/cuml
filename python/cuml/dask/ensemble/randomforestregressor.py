@@ -187,10 +187,6 @@ class RandomForestRegressor(
         (if foldGroupSize doesn't evenly divide the number of groups, a single fold will be smaller,
         as it will contain the remaining groups). Then minTreesPerGroupFold are grown with each
         entire fold of groups left out.
-
-    group_col_idx : int (default = -1)
-        The numeric index of the column to be used for group processing
-
     """
 
     def __init__(
@@ -291,6 +287,7 @@ class RandomForestRegressor(
             is trained on its partition
 
         """
+        print("regress outer fit")
         self.internal_model = None
         self._fit(
             model=self.rfs,

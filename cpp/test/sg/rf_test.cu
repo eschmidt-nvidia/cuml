@@ -241,8 +241,7 @@ auto TrainScore(
                                       params.n_streams,
                                       128,
                                       0,
-                                      0,
-                                      -1);
+                                      0);
 
   auto forest     = std::make_shared<RandomForestMetaData<DataT, LabelT>>();
   auto forest_ptr = forest.get();
@@ -576,7 +575,7 @@ TEST(RfTests, IntegerOverflow)
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0, -1);
+    set_rf_params(3, 100, 1.0, 256, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0);
   fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
@@ -602,35 +601,26 @@ TEST(RfTests, IntegerOverflow)
   fil::predict(handle, fil_forest, pred.data().get(), X.data().get(), m, false);
 }
 
-namespace {
-  struct TransformFunctor {
-    __device__ float operator()(float input) {
-      return roundf(input);
-    }
-  };  
-}
-
-
 TEST(RfTests, Honesty)
 {
   std::size_t m = 10000;
   std::size_t n = 2150;
   thrust::device_vector<float> X(m * n);
   thrust::device_vector<float> y(m);
+
   raft::random::Rng r(4);
   r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 1, 128, 0, 0, -1);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 1, 128, 0, 0);
   fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
@@ -658,7 +648,7 @@ TEST(RfTests, Honesty)
 
 TEST(RfTests, SmallHonestFolds)
 {
-  std::size_t m = 1000;
+  std::size_t m = 100;
   std::size_t n = 10;
   thrust::device_vector<float> X(m * n);
   thrust::device_vector<float> y(m);
@@ -666,19 +656,28 @@ TEST(RfTests, SmallHonestFolds)
   r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
+  int n_trees = 5;
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 1, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, n_trees, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
+
+  // Log out what's returned
+  // for(int ix_tree = 0; ix_tree < n_trees; ++ix_tree) {
+  //   for (int ix_sample = 0; ix_sample < m; ++ix_sample) {
+  //     printf("tree %d sample %d enum %d\n", ix_tree, ix_sample, forest->trees[ix_tree]->split_avg_enums[ix_sample]);
+  //   }
+  // }
 
   // See if fil overflows
   thrust::device_vector<float> pred(m);
@@ -704,7 +703,7 @@ TEST(RfTests, SmallHonestFolds)
 
 TEST(RfTests, SmallHonestFoldsWithFallback)
 {
-  std::size_t m = 1000;
+  std::size_t m = 100;
   std::size_t n = 10;
   thrust::device_vector<float> X(m * n);
   thrust::device_vector<float> y(m);
@@ -712,17 +711,19 @@ TEST(RfTests, SmallHonestFoldsWithFallback)
   r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
+
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -757,17 +758,18 @@ TEST(RfTests, SmallDishonestFoldsWithFallback)
   r.normal(X.data().get(), X.size(), 0.0f, 1.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+ 
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 100, 1.0, 0, CRITERION::MSE, 1, 128, 1, 5);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -802,17 +804,18 @@ TEST(RfTests, HonestFolds)
   r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 4, 128, 2, 2, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 1, 128, 2, 2);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -847,17 +850,18 @@ TEST(RfTests, HonestGroups)
   r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+  
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
+
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, true, true, 5, 1.0, 0, CRITERION::MSE, 4, 128, 0, 0);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -892,17 +896,17 @@ TEST(RfTests, DishonestFolds)
   r.normal(X.data().get(), X.size(), 0.0f, 2.0f, nullptr);
   cudaStream_t stream;
   cudaStreamCreate(&stream);
-  thrust::transform(thrust::cuda::par.on(stream), X.data(), 
-      X.data() + m, X.data(), TransformFunctor{});
-  // quantize the first column so that we can use it for meaningful groups
+  
+  thrust::device_vector<int> groups(m);
+  r.uniformInt(groups.data().get(), m, 0, 10, nullptr);
   r.normal(y.data().get(), y.size(), 0.0f, 2.0f, nullptr);
   auto forest      = std::make_shared<RandomForestMetaData<float, float>>();
   auto forest_ptr  = forest.get();
   auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(4);
   raft::handle_t handle(rmm::cuda_stream_per_thread, stream_pool);
   RF_params rf_params =
-    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 5, 1.0, 0, CRITERION::MSE, 4, 128, 2, 2, 0);
-  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params);
+    set_rf_params(3, 100, 1.0, 256, 1, 1, 2, 2, 0.0, true, false, false, 5, 1.0, 0, CRITERION::MSE, 4, 128, 2, 2);
+  fit(handle, forest_ptr, X.data().get(), m, n, y.data().get(), rf_params, groups.data().get());
   // Check we have actually learned something
   EXPECT_GT(forest->trees[0]->leaf_counter, 1);
 
@@ -1143,7 +1147,7 @@ INSTANTIATE_TEST_CASE_P(RfTests, RFQuantileVariableBinsTestD, ::testing::ValuesI
 
 TEST(RfTest, TextDump)
 {
-  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, GINI, 1, 128, 0, 0, -1);
+  RF_params rf_params = set_rf_params(2, 2, 1.0, 2, 1, 0, 2, 0, 0.0, false, false, false, 1, 1.0, 0, GINI, 1, 128, 0, 0);
   auto forest         = std::make_shared<RandomForestMetaData<float, int>>();
 
   std::vector<float> X_host      = {1, 2, 3, 6, 7, 8};

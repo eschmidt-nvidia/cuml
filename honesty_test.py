@@ -23,6 +23,7 @@ for ix_state,state in enumerate(states):
   states_map[state] = float(ix_state)
 
 input["state"] = input["state"].map(states_map)
+input.drop(labels=["state"], axis=1)
 
 # state fields are redundant with state value
 # state_fields = ["d_st_AK","d_st_AR","d_st_AZ","d_st_CO","d_st_FL","d_st_GA","d_st_IA","d_st_KS","d_st_KY","d_st_LA","d_st_ME","d_st_MI","d_st_NC","d_st_NH","d_st_SD","d_st_TX","d_st_WI"]
@@ -30,6 +31,7 @@ input["state"] = input["state"].map(states_map)
 
 input = input.astype('float32')
 input = input.dropna()
+groups = input["state"].astype('int')
 
 # Choose how many index include for random selection
 num_rows = input.shape[0]
@@ -41,20 +43,27 @@ y = input["voted14"]
 
 x_train = x.iloc[ix_train, :]
 y_train = y.iloc[ix_train]
+groups_train = groups.iloc[ix_train]
 
 x_test = x.iloc[ix_test, :]
 y_test = y.iloc[ix_test]
 
 n_trees = 100
 
+
 # Start group call -- note we're not using groups to specify OOB predictions
 # Note, here we specify a column index to use for groups. Then the fit() function
 # will use the GPU to compute unique group ids for every sample. 
-group_col_idx = x.columns.get_loc("state")
 random_forest_regress = RFR(n_estimators=n_trees, oob_honesty=True, split_criterion=2, 
-    random_state=42, minTreesPerGroupFold=5, foldGroupSize=1, group_col_idx=group_col_idx)
+    random_state=42, minTreesPerGroupFold=20, foldGroupSize=3)
 start = time.time()
-trainedRFR = random_forest_regress.fit(x_train, y_train)
+trainedRFR = random_forest_regress.fit(x_train, y_train, groups_train)
+
+# Shows the full meta information. The callback allows you to fill arrays yourself as needed
+for ix_tree in range(10):
+  for ix_row in range(3):
+    print(f"tree {ix_tree} row {ix_row} enum {random_forest_regress.get_tree_sample_honesty_group_meta(ix_tree, ix_row)}")
+
 end = time.time()
 pred_test_regress = trainedRFR.predict(x_test)
 mse = cuml.metrics.mean_squared_error(y_test, pred_test_regress)
@@ -66,6 +75,12 @@ trainedRFR = random_forest_regress.fit(x_train, y_train)
 end = time.time()
 pred_test_regress = trainedRFR.predict(x_test)
 mse = cuml.metrics.mean_squared_error(y_test, pred_test_regress)
+
+# Note this shows invalid -- the metadata isn't filled in when honesty is disabled
+for ix_tree in range(10):
+  for ix_row in range(3):
+    print(f"tree {ix_tree} row {ix_row} enum {random_forest_regress.get_tree_sample_honesty_group_meta(ix_tree, ix_row)}")
+
 print(f"No honesty {mse} time {end-start}")
 
 random_forest_regress = RFR(n_estimators=n_trees, oob_honesty=True, split_criterion=2, random_state=42)
@@ -74,5 +89,12 @@ trainedRFR = random_forest_regress.fit(x_train, y_train)
 end = time.time()
 pred_test_regress = trainedRFR.predict(x_test)
 mse = cuml.metrics.mean_squared_error(y_test, pred_test_regress)
+
+# Shows meta info without groups
+for ix_tree in range(10):
+  for ix_row in range(3):
+    print(f"tree {ix_tree} row {ix_row} enum {random_forest_regress.get_tree_sample_honesty_group_meta(ix_tree, ix_row)}")
+
+
 print(f"Honesty {mse} time {end-start}")
 

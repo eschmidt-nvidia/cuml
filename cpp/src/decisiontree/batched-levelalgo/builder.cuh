@@ -85,7 +85,7 @@ class NodeQueue {
 
     int nTrain = int(instance.count - instance.avg_count);
     if (nTrain < params.min_samples_split_splitting) return false;
-    if (params.oob_honesty and instance.avg_count < params.min_samples_split_averaging) return false;
+    if (params.oob_honesty and static_cast<int>(instance.avg_count) < params.min_samples_split_averaging) return false;
     if (params.max_leaves != -1 && tree->leaf_counter >= params.max_leaves) return false;
     return true;
   }

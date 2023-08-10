@@ -83,6 +83,14 @@ cdef extern from "cuml/ensemble/randomforest.hpp" namespace "ML":
                                           int
                                           ) except +
 
+    #
+    # Extra method for filling the tree meta information
+    #
+    cdef int get_tree_row_meta_info[T,L](int, 
+                                         int,
+                                         RandomForestMetaData[T, L]*
+                                         ) except +
+
     cdef void delete_rf_metadata[T, L](RandomForestMetaData[T, L]*) except +
 
     #
@@ -109,7 +117,6 @@ cdef extern from "cuml/ensemble/randomforest.hpp" namespace "ML":
                                  float,
                                  uint64_t,
                                  CRITERION,
-                                 int,
                                  int,
                                  int,
                                  int,

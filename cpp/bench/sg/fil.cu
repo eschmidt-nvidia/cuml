@@ -78,7 +78,7 @@ class FIL : public RegressionFixture<float> {
     ML::RandomForestRegressorF rf_model;
     auto* mPtr         = &rf_model;
     size_t train_nrows = std::min(params.nrows, 1000);
-    fit(*handle, mPtr, data.X.data(), train_nrows, params.ncols, data.y.data(), p_rest.rf);
+    fit(*handle, mPtr, data.X.data(), train_nrows, params.ncols, data.y.data(), p_rest.rf, nullptr);
     handle->sync_stream(stream);
 
     ML::build_treelite_forest(&model, &rf_model, params.ncols);
@@ -166,8 +166,7 @@ std::vector<Params> getInputs()
                        8,                  /* n_streams */
                        128                 /* max_batch_size */,
                        0,                  /* minTreesPerGroupFold */
-                       0,                  /* foldGroupSize */
-                       -1                  /* group_col_idx */
+                       0                   /* foldGroupSize */
   );
 
   using ML::fil::algo_t;

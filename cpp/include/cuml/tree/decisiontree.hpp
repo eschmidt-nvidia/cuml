@@ -117,6 +117,8 @@ void set_tree_params(DecisionTreeParams& params,
                      int cfg_max_batch_size          = 4096,
                      bool cfg_oob_honesty            = false);
 
+enum SplitAvgUnusedEnum {unused = 0, split, avg, group_split_unselected, group_avg_unselected, invalid};
+
 template <class T, class L>
 struct TreeMetaDataNode {
   int treeid;
@@ -125,6 +127,7 @@ struct TreeMetaDataNode {
   double train_time;
   std::vector<T> vector_leaf;
   std::vector<SparseTreeNode<T, L>> sparsetree;
+  std::vector<SplitAvgUnusedEnum> split_avg_enums;  
   int num_outputs;
 };
 

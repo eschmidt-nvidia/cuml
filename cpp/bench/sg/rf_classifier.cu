@@ -66,7 +66,8 @@ class RFClassifier : public BlobsFixture<D> {
           this->params.ncols,
           this->data.y.data(),
           this->params.nclasses,
-          rfParams);
+          rfParams,
+          nullptr /* groups */);
       this->handle->sync_stream(this->stream);
     });
   }
@@ -110,8 +111,7 @@ std::vector<Params> getInputs()
                        8,                   /* n_streams */
                        128,                 /* max_batch_size */
                        0,                   /* minTreesPerGroupFold */
-                       0,                   /* foldGroupSize */
-                       -1                   /* group_col_idx */
+                       0                    /* foldGroupSize */
   );
 
   std::vector<Triplets> rowcols = {
